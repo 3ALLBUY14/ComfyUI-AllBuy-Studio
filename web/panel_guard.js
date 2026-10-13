@@ -173,7 +173,8 @@ export function installCornerHover(host, corner) {
     if (!host.isConnected) { corner.classList.remove("show"); return; }
     const r = host.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) { corner.classList.remove("show"); return; } // 远缩放/离屏剔除
-    const near = e.clientX >= r.left && e.clientY >= r.top
+    const near = e.clientX >= r.left && e.clientX <= r.right
+      && e.clientY >= r.top && e.clientY <= r.bottom
       && (r.right - e.clientX) < 170 && (r.bottom - e.clientY) < 46;
     corner.classList.toggle("show", near || corner.matches(":hover"));
   };

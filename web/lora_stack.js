@@ -2,7 +2,7 @@
 //   顶栏：模型类型三段式（Checkpoint/UNET/GGUF）+ 模型选择 .vpl-dd + 分组管理按钮；
 //         GGUF 时浮出高级参数折叠区（dequant/patch/patch_on_device）。
 //   LoRA 列表：玻璃卡行 —— 拖拽排序把手 / 胶囊滑钮开关 / 收藏星 / 名称(树状选择器) /
-//         权重滑杆+数值徽标 / ⚙(min/max+触发词) / 🗑。
+//         权重滑杆+数值输入框 / ⚙(min/max+触发词) / 🗑。
 //   选择器：自定义分组(我的收藏等) 分区 + 全部文件可折叠文件树；搜索按完整路径过滤。
 //   底栏：启用计数 + 触发词实时汇总（截断、点击复制）。
 //   状态机：node._stackEntries ↔ stack_json widget 单一事实源（防抖 120ms 写回）。
@@ -15,10 +15,13 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { installBypassSync, installExecutionLock, applyFillPanel, installFillResize } from "./panel_guard.js";
+import { installStackTools } from "./lora_stack_tools.js";
+import { installLoRACatalog } from "./lora_catalog.js";
+import { installLoRAScroll } from "./lora_scroll.js";
 
 const NODE_NAME = "AllBuyLoRAStack";
 // 版本日志：与 videoprompt_library.js/batch_image_selector.js 同款，用户贴控制台即可核对前端新旧
-console.info("[AllBuy_PromptLibrary] LoRA 堆栈前端已加载 v3.127");
+console.info("[AllBuy_PromptLibrary] LoRA 堆栈前端已加载 v3.139");
 const API = "/allbuy_promptlibrary";
 const STACK_MIN_WIDTH = 560;
 const STACK_BOTTOM_GAP = 18; // 节点色底缝（测容器+18，与 videoprompt/batch/media 三兄弟一致）
@@ -29,6 +32,7 @@ const DEFAULT_WEIGHT = 1;
 const DEFAULT_WEIGHT_MIN = -3;
 const DEFAULT_WEIGHT_MAX = 3;
 const WEIGHT_STEP = 0.01;
+const WEIGHT_SLIDER_STEP = 0.05;
 const WEIGHT_DIGITS = 2;
 const STACK_WRITE_DELAY = 120;
 const OPTIONS_TTL = 5000;
@@ -122,12 +126,14 @@ async function getLoraOptions() {
   return optionList(info, "lora_picker") || ["None"];
 }
 
-async function loadGroups() {
+async function loadGroups({ strict = false } = {}) {
   try {
-    const res = await fetch(API + "/lora_groups");
+    const res = await fetch(API + "/lora_groups", { cache: "no-store" });
+    if (!res.ok) throw new Error("无法读取 LoRA 分组（HTTP " + res.status + "）");
     const d = await res.json();
-    if (d && Array.isArray(d.groups)) cachedGroups = d;
-  } catch (_) { /* 失败保留旧值 */ }
+    if (!d || !Array.isArray(d.groups)) throw new Error("LoRA 分组数据格式错误");
+    cachedGroups = d;
+  } catch (err) { if (strict) throw err; /* 普通刷新失败保留旧值 */ }
   return cachedGroups;
 }
 
@@ -162,6 +168,7 @@ function readStack(node) {
 
 function writeStack(node) {
   clearPendingStackWrite(node);
+  node._aloraCatalog?.sortEntries();
   const serializable = (node._stackEntries || []).map(({ _editingRange, ...rest }) => rest);
   setWidget(findWidget(node, "stack_json"), JSON.stringify(serializable));
 }
@@ -252,7 +259,7 @@ function buildTree(loras) {
   return root;
 }
 
-function renderTreeNode(container, node, depth, expandedMap, onPick) {
+function renderTreeNode(container, node, depth, expandedMap, onPick, decorate = null) {
   const dirNames = Object.keys(node.dirs).sort();
   for (const dirName of dirNames) {
     const row = document.createElement("div");
@@ -273,17 +280,17 @@ function renderTreeNode(container, node, depth, expandedMap, onPick) {
       if (expandedMap.has(dirName)) expandedMap.delete(dirName);
       else expandedMap.add(dirName);
       container.replaceChildren();
-      renderTreeNode(container, node, depth, expandedMap, onPick);
+      renderTreeNode(container, node, depth, expandedMap, onPick, decorate);
     });
     container.appendChild(row);
     if (expandedMap.has(dirName)) {
       const child = document.createElement("div");
       child.className = "alora-tree-children";
       container.appendChild(child);
-      renderTreeNode(child, node.dirs[dirName], depth + 1, expandedMap, onPick);
+      renderTreeNode(child, node.dirs[dirName], depth + 1, expandedMap, onPick, decorate);
     }
   }
-  const files = node.files.sort();
+  const files = node.files.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
   for (const file of files) {
     const row = document.createElement("div");
     row.className = "alora-node alora-file";
@@ -299,6 +306,7 @@ function renderTreeNode(container, node, depth, expandedMap, onPick) {
     path.className = "alora-path";
     path.textContent = loraDir(file) || "LoRA 根目录";
     row.append(dot, label, path);
+    decorate?.(row, file);
     row.addEventListener("click", (e) => {
       e.stopPropagation();
       onPick(file);
@@ -311,7 +319,8 @@ function renderTreeNode(container, node, depth, expandedMap, onPick) {
 // 不必每次从收起的树根重新逐层点开
 const pickerExpanded = new Set();
 
-function showLoraPicker(node, anchor, entry) {
+function showLoraPicker(node, anchor, entry = null) {
+  node._aloraPickerClose?.();
   const pop = document.createElement("div");
   pop.className = "alora-pop";
   document.body.appendChild(pop);
@@ -322,6 +331,10 @@ function showLoraPicker(node, anchor, entry) {
   search.type = "text";
   stopGraph(search);
   pop.appendChild(search);
+
+  const picker = node._aloraCatalog?.pickerControls(() => render());
+  if (picker) pop.appendChild(picker.bar);
+  const decorate = (row, name) => node._aloraCatalog?.decoratePickerRow(row, name, (tag) => picker?.setTag(tag));
 
   const list = document.createElement("div");
   list.className = "alora-pop-list";
@@ -334,13 +347,17 @@ function showLoraPicker(node, anchor, entry) {
     const allLoras = node._loraOptions || [];
 
     const pick = (name) => {
-      entry.name = name;
+      if (entry) entry.name = name;
+      else node._stackEntries.push({ ...defaultEntry(), name });
+      node._aloraCatalog?.revealEntries();
+      node._stackFilter = "";
+      if (node._stackFilterInput) node._stackFilterInput.value = "";
       writeStack(node);
       renderStack(node);
       close();
     };
 
-    if (!query) {
+    if (!query && !picker?.tags.value && (!picker || picker.sorting.value === "name_asc")) {
       for (const g of groups) {
         const members = g.loras || [];
         if (!members.length) continue;
@@ -359,7 +376,7 @@ function showLoraPicker(node, anchor, entry) {
               node._stackEntries.push({ ...defaultEntry(), name: n });
               added++;
             }
-            if (added) { writeStack(node); renderStack(node); }
+            if (added) { node._aloraCatalog?.revealEntries(); writeStack(node); renderStack(node); }
             close();
           }, "alora-grp-addall",
         ));
@@ -379,6 +396,7 @@ function showLoraPicker(node, anchor, entry) {
           path.className = "alora-path";
           path.textContent = loraDir(name) || "LoRA 根目录";
           row.append(dot, label, path);
+          decorate(row, name);
           row.addEventListener("click", (e) => { e.stopPropagation(); pick(name); });
           list.appendChild(row);
         }
@@ -394,10 +412,12 @@ function showLoraPicker(node, anchor, entry) {
         list.appendChild(headAll);
         const treeBox = document.createElement("div");
         list.appendChild(treeBox);
-        renderTreeNode(treeBox, buildTree(free), 0, pickerExpanded, pick);
+        renderTreeNode(treeBox, buildTree(free), 0, pickerExpanded, pick, decorate);
       }
     } else {
-      const hits = allLoras.filter((n) => n.toLowerCase().includes(query));
+      const filtered = allLoras.filter((name) => node._aloraCatalog
+        ? node._aloraCatalog.matchesName(name, query, picker?.tags.value || "") : name.toLowerCase().includes(query));
+      const hits = node._aloraCatalog?.sortedNames(filtered, picker?.sorting.value || "name_asc") || filtered;
       if (!hits.length) {
         const empty = document.createElement("div");
         empty.className = "alora-pop-empty";
@@ -418,6 +438,7 @@ function showLoraPicker(node, anchor, entry) {
           path.className = "alora-path";
           path.textContent = loraDir(name) || "LoRA 根目录";
           row.append(dot, label, path);
+          decorate(row, name);
           row.addEventListener("click", (e) => { e.stopPropagation(); pick(name); });
           list.appendChild(row);
         }
@@ -427,18 +448,24 @@ function showLoraPicker(node, anchor, entry) {
 
   const position = () => {
     const r = anchor.getBoundingClientRect();
-    const w = Math.max(420, Math.min(520, window.innerWidth - 16));
-    pop.style.left = Math.min(r.left, window.innerWidth - w - 8) + "px";
-    pop.style.top = (r.bottom + 4) + "px";
+    const w = Math.min(520, window.innerWidth - 16);
+    pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + "px";
     pop.style.width = w + "px";
+    pop.style.maxHeight = Math.max(100, window.innerHeight - 16) + "px";
+    const h = pop.offsetHeight;
+    pop.style.top = Math.max(8, r.bottom + h + 8 <= window.innerHeight ? r.bottom + 4 : r.top - h - 4) + "px";
   };
 
   const close = () => {
-    document.removeEventListener("mousedown", onDocDown, true);
+    document.removeEventListener("pointerdown", onDocDown, true);
     document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("resize", position);
     pop.remove();
-    node._aloraPickerClose = null;
-    node._aloraPickerAnchor = null;
+    if (node._aloraPickerClose === close) {
+      node._aloraPickerClose = null;
+      node._aloraPickerAnchor = null;
+      node._aloraPickerMode = null;
+    }
   };
   const onDocDown = (e) => {
     // 弹层内与锚钮自身不关：锚钮交给它 click 里的开合切换（捕获先关、click 又开会
@@ -452,7 +479,7 @@ function showLoraPicker(node, anchor, entry) {
 
   // 打开时定位到当前条目：先展开它所在目录链（树按目录名记展开态），渲染后滚到它的行——
   // 重开即看到上次选的文件在哪，不用凭记忆重新翻
-  const focusName = entry.name && entry.name !== "None" ? entry.name : null;
+  const focusName = entry?.name && entry.name !== "None" ? entry.name : null;
   if (focusName) {
     const d = loraDir(focusName);
     if (d) for (const seg of d.split(/[\\/]/)) pickerExpanded.add(seg);
@@ -471,10 +498,12 @@ function showLoraPicker(node, anchor, entry) {
   requestAnimationFrame(position);
   // 关闭监听挂捕获阶段：v3.79 起 stopGraph(list) 会截停列表区域 mousedown 的冒泡，
   // 挂冒泡则点列表空白/行非控件区时事件到不了 document，弹层关不掉（onDocDown 内豁免锚钮）
-  document.addEventListener("mousedown", onDocDown, true);
+  document.addEventListener("pointerdown", onDocDown, true);
   document.addEventListener("keydown", onKey, true);
+  window.addEventListener("resize", position);
   node._aloraPickerClose = close;
   node._aloraPickerAnchor = anchor;
+  node._aloraPickerMode = "file";
   search.focus();
 }
 
@@ -586,6 +615,9 @@ function createDropdown(options, current, onChange, cls = "") {
 function renderStack(node) {
   const list = node._stackList;
   if (!list) return;
+  node._stackDragCleanup?.();
+  node._aloraScroll?.prepare();
+  if (node._aloraCatalog?.sortEntries()) writeStack(node);
   list.replaceChildren();
   const entries = node._stackEntries || [];
   const options = node._loraOptions || [];
@@ -605,6 +637,7 @@ function renderStack(node) {
     row.dataset.id = entry.id;
     row.dataset.name = entry.name || "";
     const isFav = favGroup(cachedGroups.groups)?.loras?.includes(entry.name) || false;
+    if (node._aloraMultiSelect) row.appendChild(node._aloraMultiSelect.checkbox(entry));
 
     // 拖拽把手
     const handle = document.createElement("div");
@@ -668,6 +701,7 @@ function renderStack(node) {
       showLoraPicker(node, nameBtn, entry);
     });
     nameWrap.appendChild(nameBtn);
+    if (node._aloraCatalog) nameWrap.appendChild(node._aloraCatalog.rowTags(entry.name));
     row.appendChild(nameWrap);
 
     // 权重滑杆 + 数值
@@ -677,19 +711,54 @@ function renderStack(node) {
     slider.type = "range";
     slider.min = String(entry.min);
     slider.max = String(entry.max);
-    slider.step = String(WEIGHT_STEP);
+    slider.step = String(WEIGHT_SLIDER_STEP);
     slider.value = String(entry.weight);
     slider.disabled = !entry.enabled;
     stopGraph(slider);
-    const val = document.createElement("span");
+    const val = document.createElement("input");
+    val.type = "number";
     val.className = "alora-val";
-    val.textContent = formatWeight(entry.weight);
+    val.min = String(entry.min);
+    val.max = String(entry.max);
+    val.step = String(WEIGHT_STEP);
+    val.value = formatWeight(entry.weight);
+    val.disabled = !entry.enabled;
+    val.title = "手动输入权重，回车或失焦确认";
+    val.setAttribute("aria-label", "LoRA 权重");
+    stopGraph(val);
+    const applyWeightInput = () => {
+      const weight = Number(val.value);
+      if (val.value.trim() === "" || !Number.isFinite(weight)) return false;
+      entry.weight = clamp(roundedWeight(weight), Number(entry.min), Number(entry.max));
+      slider.value = String(entry.weight);
+      updateFooter(node);
+      return true;
+    };
+    val.addEventListener("input", () => {
+      if (applyWeightInput()) scheduleWriteStack(node);
+    });
+    const commitWeightInput = () => {
+      applyWeightInput();
+      val.value = formatWeight(entry.weight);
+      writeStack(node);
+    };
+    val.addEventListener("change", commitWeightInput);
+    val.addEventListener("blur", commitWeightInput);
+    val.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitWeightInput();
+        val.blur();
+      }
+    });
     // 强度微调钮：数值右侧上下箭头小柱（滑块拖动难停在 0.05 档位上，按钮点得准；Alt 加速 ±1）
     const nudgeWeight = (e, d) => {
-      const step = e?.altKey ? 1 : 0.05;
+      const step = e?.altKey ? 1 : WEIGHT_SLIDER_STEP;
       entry.weight = clamp(roundedWeight(entry.weight + (d < 0 ? -step : step)), Number(entry.min), Number(entry.max));
       slider.value = String(entry.weight);
-      val.textContent = formatWeight(entry.weight);
+      val.value = formatWeight(entry.weight);
+      updateFooter(node);
       writeStack(node);
     };
     const nudgeCol = document.createElement("div");
@@ -706,7 +775,8 @@ function renderStack(node) {
     nudgeCol.append(nudgeUp, nudgeDown);
     slider.addEventListener("input", () => {
       entry.weight = roundedWeight(slider.value);
-      val.textContent = formatWeight(entry.weight);
+      val.value = formatWeight(entry.weight);
+      updateFooter(node);
       scheduleWriteStack(node);
     });
     slider.addEventListener("change", () => writeStack(node));
@@ -823,24 +893,152 @@ function renderStack(node) {
     }
   }
   updateFooter(node);
-  if (node._stackFilterInput) {
-    node._stackFilterInput.style.display = entries.length >= 6 ? "" : "none";
-    if (entries.length < 6 && node._stackFilter) {
-      // 入口已收起：残留筛选词仍隐藏不匹配行且无从清除（最坏整表看似清空），随行数回落一并清掉
-      node._stackFilter = "";
-      node._stackFilterInput.value = "";
-    }
-  }
+  if (node._stackFilterInput) node._stackFilterInput.style.display = "";
   applyRowFilter(node);
+  node._aloraToolsSync?.();
   recalcStackHeight(node);
+  node._aloraScroll?.restore();
 }
 
 function applyRowFilter(node) {
   const q = node._stackFilter || "";
+  const entries = new Map((node._stackEntries || []).map((entry) => [entry.id, entry]));
   for (const row of node._stackList?.children || []) {
     if (!row.classList.contains("alora-row")) continue;
-    row.style.display = !q || (row.dataset.name || "").toLowerCase().includes(q) ? "" : "none";
+    const entry = entries.get(row.dataset.id);
+    const visible = node._aloraCatalog && entry ? node._aloraCatalog.matches(entry)
+      : !q || (row.dataset.name || "").toLowerCase().includes(q);
+    row.style.display = visible ? "" : "none";
+    const details = row.nextElementSibling;
+    if (details?.classList.contains("alora-range-row")) details.style.display = row.style.display;
   }
+}
+
+// 原行作为落点占位，DOM 实时排序；仅 drop 写回数据，取消时恢复原 DOM 顺序。
+function installStackSorting(node, list) {
+  let drag = null;
+  const animations = new Map();
+  const cleanup = (restore = true) => {
+    if (!drag) return;
+    cancelAnimationFrame(drag.frame);
+    for (const animation of animations.values()) animation.cancel();
+    animations.clear();
+    drag.row.classList.remove("alora-dragging");
+    drag.details?.classList.remove("alora-drag-details");
+    if (restore) {
+      const scrollTop = list.scrollTop;
+      for (const child of drag.originalChildren) list.appendChild(child);
+      list.scrollTop = scrollTop;
+    }
+    drag = null;
+    node._stackDraggingId = null;
+  };
+  node._stackDragCleanup = cleanup;
+
+  const placeAt = (clientY) => {
+    if (!drag) return;
+    const listRect = list.getBoundingClientRect();
+    const scale = listRect.height / list.offsetHeight || 1;
+    // 使用布局坐标命中，避免避让动画的 transform 改变落点、引起反复跳位。
+    const topOf = (el) => listRect.top + (list.clientTop + el.offsetTop - list.scrollTop) * scale;
+    const endOf = (row) => row.nextElementSibling?.classList.contains("alora-range-row")
+      && row.nextElementSibling.style.display !== "none" ? row.nextElementSibling : row;
+    const slotTop = topOf(drag.row);
+    const slotEnd = drag.details || drag.row;
+    const slotBottom = topOf(slotEnd) + slotEnd.offsetHeight * scale;
+    if (clientY >= slotTop && clientY <= slotBottom) return;
+
+    const rows = Array.from(list.children).filter((el) =>
+      el.classList.contains("alora-row") && el !== drag.row && el.style.display !== "none");
+    const before = rows.find((row) => {
+      const end = endOf(row);
+      return clientY < (topOf(row) + topOf(end) + end.offsetHeight * scale) / 2;
+    }) || null;
+    if (slotEnd.nextElementSibling === before || (!before && slotEnd === list.lastElementChild)) return;
+
+    const others = Array.from(list.children).filter((el) =>
+      el !== drag.row && el !== drag.details && el.style.display !== "none");
+    const oldTops = others.map((el) => el.getBoundingClientRect().top);
+    const scrollTop = list.scrollTop;
+    list.insertBefore(drag.row, before);
+    if (drag.details) list.insertBefore(drag.details, before);
+    list.scrollTop = scrollTop;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    others.forEach((el, i) => {
+      animations.get(el)?.cancel();
+      const dy = (oldTops[i] - el.getBoundingClientRect().top) / scale;
+      if (reduceMotion || Math.abs(dy) < 0.5 || typeof el.animate !== "function") return;
+      const animation = el.animate([
+        { transform: `translateY(${dy}px)` }, { transform: "translateY(0)" },
+      ], { duration: 160, easing: "ease-out" });
+      animations.set(el, animation);
+      const forget = () => { if (animations.get(el) === animation) animations.delete(el); };
+      animation.onfinish = animation.oncancel = forget;
+    });
+  };
+
+  list.addEventListener("dragstart", (e) => {
+    const handle = e.target.closest(".vpl-drag-handle");
+    const row = handle?.closest(".alora-row");
+    if (!row || !list.contains(row) || !e.dataTransfer) return;
+    e.stopPropagation();
+    cleanup();
+    const details = row.nextElementSibling?.classList.contains("alora-range-row")
+      ? row.nextElementSibling : null;
+    drag = { row, details, originalChildren: Array.from(list.children), frame: 0 };
+    node._stackDraggingId = row.dataset.id;
+    e.dataTransfer.setData("text/plain", row.dataset.id);
+    e.dataTransfer.effectAllowed = "move";
+    // 等浏览器截取原行作为拖拽预览后，再将列表内的原行显示为落点空位。
+    drag.frame = requestAnimationFrame(() => {
+      if (!drag) return;
+      row.classList.add("alora-dragging");
+      details?.classList.add("alora-drag-details");
+    });
+  });
+  list.addEventListener("dragover", (e) => {
+    if (!drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    placeAt(e.clientY);
+  });
+  list.addEventListener("dragenter", (e) => {
+    if (!drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+  });
+  list.addEventListener("drop", (e) => {
+    if (!drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer?.getData("text/plain") !== node._stackDraggingId) {
+      cleanup();
+      return;
+    }
+    placeAt(e.clientY);
+    const entries = new Map(node._stackEntries.map((entry) => [entry.id, entry]));
+    const reordered = Array.from(list.children)
+      .filter((el) => el.classList.contains("alora-row"))
+      .map((row) => entries.get(row.dataset.id));
+    if (reordered.length !== entries.size || reordered.some((entry) => !entry)) {
+      cleanup();
+      return;
+    }
+    const scrollTop = list.scrollTop;
+    cleanup(false);
+    node._stackEntries = reordered;
+    node._aloraCatalog?.setManualOrder();
+    writeStack(node);
+    renderStack(node);
+    list.scrollTop = scrollTop;
+  });
+  list.addEventListener("dragend", (e) => {
+    if (!drag) return;
+    e.stopPropagation();
+    cleanup();
+  });
 }
 
 function updateFooter(node) {
@@ -868,6 +1066,7 @@ function updateFooter(node) {
 // 分组管理弹窗
 // ---------------------------------------------------------------------------
 function showGroupManager(node) {
+  node._aloraGroupManagerClose?.();
   const overlay = document.createElement("div");
   overlay.className = "vpl-overlay alora-grp-overlay";
   document.body.appendChild(overlay);
@@ -880,7 +1079,15 @@ function showGroupManager(node) {
   const title = document.createElement("div");
   title.className = "vpl-dialog-title";
   title.innerHTML = "<span>LoRA 自定义分组</span>";
-  const closeBtn = makeIconBtn("✕", "关闭", () => overlay.remove());
+  const close = () => {
+    overlay.remove();
+    if (node._aloraGroupManagerClose === close) {
+      node._aloraGroupManagerClose = null;
+      node._aloraGroupManagerRefresh = null;
+    }
+  };
+  node._aloraGroupManagerClose = close;
+  const closeBtn = makeIconBtn("✕", "关闭", close);
   title.appendChild(closeBtn);
   dialog.appendChild(title);
 
@@ -889,6 +1096,7 @@ function showGroupManager(node) {
   dialog.appendChild(body);
 
   const groups = (cachedGroups.groups || []).map((g) => ({ ...g, loras: [...(g.loras || [])] }));
+  let groupsDirty = false;
   let activeId = groups[0]?.id || null;
   const rowById = new Map(); // 分组卡片行：选中态/计数原地更新，不重建列表（防点击闪烁、保滚动位置）
   const warn = (msg) => {
@@ -902,8 +1110,10 @@ function showGroupManager(node) {
   };
   // 统一保存：失败不再静默，顶部横幅提示；after 无论成败都执行（内存态照常生效）
   const persist = (after) => {
+    groupsDirty = true;
+    const saving = JSON.stringify(groups);
     saveGroups(groups)
-      .then(() => { warn(""); after(); })
+      .then(() => { groupsDirty = JSON.stringify(groups) !== saving; warn(""); after(); })
       .catch((err) => { warn("分组保存失败（" + (err?.message || "网络异常") + "）：改动暂只在本页生效"); after(); });
   };
 
@@ -961,6 +1171,7 @@ function showGroupManager(node) {
         chip.title = name;
         stopGraph(chip);
         chip.addEventListener("click", () => {
+          groupsDirty = true;
           // 原地更新：不重建列表/芯片网格（防点击闪烁、保滚动位置）。
           // 例外：移出后若仍属其他分组（跨组旧数据），按过滤口径它不再是本组候选，须从视图消失
           if (inGroup) {
@@ -1143,6 +1354,7 @@ function showGroupManager(node) {
           const fresh = (saved.groups || []).map((g) => ({ ...g, loras: [...(g.loras || [])] }));
           groups.length = 0;
           groups.push(...fresh);
+          groupsDirty = false;
           activeId = groups[0]?.id || null;
           rowById.clear();
           renderList();
@@ -1165,7 +1377,7 @@ function showGroupManager(node) {
       warn("保存失败（" + (err?.message || "网络异常") + "）：弹窗未关闭，可重试");
       return;
     }
-    overlay.remove();
+    close();
     renderStack(node);
   }, "vpl-btn-primary");
   footer.append(exportBtn, importBtn, doneBtn);
@@ -1173,8 +1385,27 @@ function showGroupManager(node) {
 
   renderList();
   renderMembers(groups.find((g) => g.id === activeId) || groups[0] || null);
+  node._aloraGroupManagerRefresh = () => {
+    if (!overlay.isConnected) return;
+    const search = memberArea.querySelector("input");
+    const query = search?.value || "";
+    const editing = !!groupList.querySelector(".alora-grp-edit");
+    // 刷新候选文件时保住未保存的成员选择、正在编辑的名称及当前搜索词。
+    if (!groupsDirty && !editing) {
+      groups.splice(0, groups.length, ...(cachedGroups.groups || [])
+        .map((g) => ({ ...g, loras: [...(g.loras || [])] })));
+    }
+    if (!groups.some((g) => g.id === activeId)) activeId = groups[0]?.id || null;
+    if (!editing) renderList();
+    renderMembers(groups.find((g) => g.id === activeId) || null);
+    const freshSearch = memberArea.querySelector("input");
+    if (freshSearch && query) {
+      freshSearch.value = query;
+      freshSearch.dispatchEvent(new Event("input"));
+    }
+  };
   overlay.addEventListener("mousedown", (e) => {
-    if (e.target === overlay) overlay.remove();
+    if (e.target === overlay) close();
   });
 }
 
@@ -1206,36 +1437,39 @@ function recalcStackHeight(node) {
     node._aloraHeightPending = false;
     const panel = node?._stackContainer;
     if (!panel?.isConnected) return;
-    // 测量用 height:auto（wrapper 被 [0,-4] 归零后 h-full 会把容器连带压成 0，
-    // rect/scrollHeight 全读不到——media_asset_loader L1495 同款"先 auto 测再写回 px"）
-    // 面板显式高度必须写【面板自身】的自然高：写容器实测值会把容器 22px 上下
-    // padding 也灌进面板，面板比内容高 22px，恰好顶穿 18px 底缝（用户报的"底部撑出边界"）
-    const prevH = panel.style.height;
-    panel.style.height = "auto";
-    panel.classList.remove("vpl-fill"); // 填充类会放宽列表上限，带着它量自然高会把节点撑爆
-    // 开着的下拉浮层是绝对定位、会计入 scrollHeight，测量前先临时藏掉（同步完成，不产生可见闪烁）
-    const pops = panel.querySelectorAll(".vpl-dd-panel");
-    const savedDisplay = [];
-    for (const p of pops) { savedDisplay.push(p.style.display); if (p.style.display === "block") p.style.display = "none"; }
-    const panelH = Math.ceil(panel.scrollHeight);
-    const contentH = stackPanelHeight(node); // 容器实测（含 12+10 padding），节点总高按它算
-    panel.style.height = panelH > 0 ? panelH + "px" : prevH;
-    for (let i = 0; i < pops.length; i++) pops[i].style.display = savedDisplay[i];
-    if (contentH <= 0) return;
-    node._aloraCachedH = Math.max(STACK_MIN_TOTAL_H, contentH + stackChromeH(node) + STACK_BOTTOM_GAP);
-    const width = node.size?.[0] > 0 ? node.size[0] : STACK_MIN_WIDTH;
-    if ((node.size?.[1] || 0) > node._aloraCachedH + 1) {
-      // 节点比内容高（用户拉高/工作流存了更大尺寸）：面板填满节点不缩回，
-      // vpl-fill 类放宽列表 400px 上限由面板滚动（CSS .alora-panel.vpl-fill）
-      applyFillPanel(node, panel, stackChromeH(node), STACK_BOTTOM_GAP);
+    node._aloraScroll?.prepare();
+    try {
+      // 测量用 height:auto（wrapper 被 [0,-4] 归零后 h-full 会把容器连带压成 0，
+      // rect/scrollHeight 全读不到——media_asset_loader L1495 同款"先 auto 测再写回 px"）
+      // 面板显式高度必须写【面板自身】的自然高：写容器实测值会把容器 22px 上下
+      // padding 也灌进面板，面板比内容高 22px，恰好顶穿 18px 底缝（用户报的"底部撑出边界"）
+      const prevH = panel.style.height;
+      panel.style.height = "auto";
+      panel.classList.remove("vpl-fill"); // 填充类会放宽列表上限，带着它量自然高会把节点撑爆
+      // 开着的下拉浮层是绝对定位、会计入 scrollHeight，测量前先临时藏掉（同步完成，不产生可见闪烁）
+      const pops = panel.querySelectorAll(".vpl-dd-panel");
+      const savedDisplay = [];
+      for (const p of pops) { savedDisplay.push(p.style.display); if (p.style.display === "block") p.style.display = "none"; }
+      const panelH = Math.ceil(panel.scrollHeight);
+      const contentH = stackPanelHeight(node); // 容器实测（含 12+10 padding），节点总高按它算
+      panel.style.height = panelH > 0 ? panelH + "px" : prevH;
+      for (let i = 0; i < pops.length; i++) pops[i].style.display = savedDisplay[i];
+      if (contentH <= 0) return;
+      node._aloraCachedH = Math.max(STACK_MIN_TOTAL_H, contentH + stackChromeH(node) + STACK_BOTTOM_GAP);
+      const width = node.size?.[0] > 0 ? node.size[0] : STACK_MIN_WIDTH;
+      if ((node.size?.[1] || 0) > node._aloraCachedH + 1) {
+        // 节点比内容高（用户拉高/工作流存了更大尺寸）：面板填满节点不缩回，
+        // vpl-fill 类放宽列表 400px 上限由面板滚动（CSS .alora-panel.vpl-fill）
+        applyFillPanel(node, panel, stackChromeH(node), STACK_BOTTOM_GAP);
+        node.graph?.setDirtyCanvas?.(true, true);
+        return;
+      }
+      panel.classList.remove("vpl-fill");
+      if (node.size?.[1] === node._aloraCachedH) return;
+      node.setSize([width, node._aloraCachedH]);
       node.graph?.setDirtyCanvas?.(true, true);
-      return;
-    }
-    panel.classList.remove("vpl-fill");
-    if (node.size?.[1] === node._aloraCachedH) return;
-    node.setSize([width, node._aloraCachedH]);
-    node.graph?.setDirtyCanvas?.(true, true);
-    app?.canvas?.setDirty?.(true, true);
+      app?.canvas?.setDirty?.(true, true);
+    } finally { node._aloraScroll?.restore(); }
   });
 }
 
@@ -1385,28 +1619,37 @@ async function attach(node) {
     listTitle.className = "alora-list-title";
     listTitle.textContent = "LoRA 堆栈";
     const addBtn = makeBtn("＋ 添加 LoRA", "添加一条 LoRA", () => {
-      node._stackEntries.push(defaultEntry());
-      node._stackFilter = ""; // 新行是 None：清筛选防"加完看不见"
-      if (node._stackFilterInput) node._stackFilterInput.value = "";
-      writeStack(node);
-      renderStack(node);
+      const same = node._aloraPickerAnchor === addBtn;
+      node._aloraPickerClose?.();
+      if (!same) showLoraPicker(node, addBtn);
     }, "vpl-btn-primary alora-add");
+    addBtn.title = "点击选择添加 LoRA；右键选择添加整组 LoRA";
+    const stackTools = installStackTools(node, {
+      defaultEntry, normStackEntry, writeStack, renderStack, recalcStackHeight, loadGroups, saveGroups,
+    });
+    addBtn.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      stackTools.openGroupPicker(addBtn);
+    });
     const invertBtn = makeBtn("全部反选", "反转所有 LoRA 启用状态", () => {
       for (const e of node._stackEntries || []) e.enabled = !e.enabled;
       writeStack(node);
       renderStack(node);
     });
-    // 行筛选：行数 ≥6 才露出（renderStack 控制显隐），按名称/路径子串过滤行
+    // 独立排序/筛选栏，始终可见；偏好保存在节点 properties 内。
     const rowFilter = document.createElement("input");
     rowFilter.type = "text";
     rowFilter.className = "vpl-input alora-rowfilter";
     rowFilter.placeholder = "筛选行…";
     stopGraph(rowFilter);
-    rowFilter.addEventListener("input", () => {
-      node._stackFilter = rowFilter.value.trim().toLowerCase();
-      applyRowFilter(node);
-    });
     node._stackFilterInput = rowFilter;
+    const catalog = installLoRACatalog(node, {
+      defaultEntry,
+      writeStack: () => writeStack(node), renderStack: () => renderStack(node),
+      applyRowFilter: () => applyRowFilter(node), recalcStackHeight: () => recalcStackHeight(node),
+      getFavorites: () => favGroup(cachedGroups.groups)?.loras || [],
+    }, rowFilter);
 
     // 堆栈预设导出/导入（独立于工作流文件的备份；图标钮静默常驻）
     const flashBtn = (b, mark, svg) => {
@@ -1418,7 +1661,7 @@ async function attach(node) {
     const importSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
     const stackExportBtn = makeIconBtn(exportSvg, "导出堆栈预设为 JSON 文件", () => {
       const entries = (node._stackEntries || []).map(({ _editingRange, ...rest }) => rest);
-      const blob = new Blob([JSON.stringify({ version: 1, entries }, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify({ version: 1, entries, view: node._aloraCatalog?.snapshotSort() }, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -1436,9 +1679,11 @@ async function attach(node) {
         const reader = new FileReader();
         reader.onload = () => {
           let raw = null;
+          let savedView = null;
           try {
             const data = JSON.parse(reader.result);
             raw = Array.isArray(data) ? data : (data && Array.isArray(data.entries) ? data.entries : null);
+            savedView = data && !Array.isArray(data) ? data.view : null;
           } catch (_) { /* raw 保持 null */ }
           if (!raw) {
             flashBtn(stackImportBtn, "✗", importSvg);
@@ -1450,6 +1695,8 @@ async function attach(node) {
             return;
           }
           node._stackEntries = entries;
+          node._aloraCatalog?.restoreSort(savedView || { sort: "manual" });
+          node._aloraCatalog?.revealEntries();
           node._stackFilter = "";
           if (node._stackFilterInput) node._stackFilterInput.value = "";
           writeStack(node);
@@ -1460,8 +1707,12 @@ async function attach(node) {
       };
       input.click();
     }, "alora-stack-io");
-    listHead.append(listTitle, rowFilter, stackImportBtn, stackExportBtn, invertBtn, addBtn);
+    listHead.append(listTitle, stackImportBtn, stackExportBtn,
+      stackTools.presetsBtn, stackTools.clearBtn, stackTools.multi.toggleBtn, invertBtn, addBtn);
     panel.appendChild(listHead);
+    panel.appendChild(catalog.toolbar);
+    panel.appendChild(stackTools.multi.bar);
+    panel.appendChild(stackTools.undoBar);
 
     const list = document.createElement("div");
     list.className = "alora-list";
@@ -1470,53 +1721,9 @@ async function attach(node) {
     stopGraph(list);
     node._stackList = list;
     panel.appendChild(list);
+    node._aloraScroll = installLoRAScroll(node, list, panel);
 
-    // 拖拽排序（事件委托）
-    list.addEventListener("dragstart", (e) => {
-      const row = e.target.closest(".alora-row");
-      if (!row) return;
-      node._stackDraggingId = row.dataset.id;
-      row.classList.add("alora-dragging");
-      e.dataTransfer.setData("text/plain", row.dataset.id);
-      e.dataTransfer.effectAllowed = "move";
-    });
-    list.addEventListener("dragend", (e) => {
-      e.target.closest(".alora-row")?.classList.remove("alora-dragging");
-      list.querySelectorAll(".alora-drop-before,.alora-drop-after").forEach((r) => r.classList.remove("alora-drop-before", "alora-drop-after"));
-      node._stackDraggingId = null;
-      node._dropTarget = null; // 结束即作废：Esc 取消/死区松手都不留旧目标，防下轮 drop 插错位
-    });
-    list.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      const row = e.target.closest(".alora-row");
-      if (!row || row.dataset.id === node._stackDraggingId) {
-        // 悬停空隙/展开行/被拖行自身：清指示与目标——保留旧值会让松手插到上一次悬停的行旁
-        list.querySelectorAll(".alora-drop-before,.alora-drop-after").forEach((r) => r.classList.remove("alora-drop-before", "alora-drop-after"));
-        node._dropTarget = null;
-        return;
-      }
-      list.querySelectorAll(".alora-drop-before,.alora-drop-after").forEach((r) => r.classList.remove("alora-drop-before", "alora-drop-after"));
-      const rect = row.getBoundingClientRect();
-      row.classList.add(e.clientY < rect.top + rect.height / 2 ? "alora-drop-before" : "alora-drop-after");
-      node._dropTarget = { id: row.dataset.id, after: e.clientY >= rect.top + rect.height / 2 };
-    });
-    list.addEventListener("drop", (e) => {
-      e.preventDefault();
-      const fromId = e.dataTransfer.getData("text/plain");
-      const entries = node._stackEntries;
-      const from = entries.findIndex((x) => x.id === fromId);
-      const target = node._dropTarget;
-      node._dropTarget = null; // 用后即清
-      if (from < 0 || !target) return;
-      let to = entries.findIndex((x) => x.id === target.id);
-      const [moved] = entries.splice(from, 1);
-      if (from < to) to -= 1;
-      if (target.after) to += 1;
-      if (from === to) { entries.splice(from, 0, moved); }
-      else entries.splice(to, 0, moved);
-      writeStack(node);
-      renderStack(node);
-    });
+    installStackSorting(node, list);
 
     // ---- 底栏 ----
     const foot = document.createElement("div");
@@ -1597,6 +1804,7 @@ async function attach(node) {
     const _prevDrawBG = node.onDrawBackground;
     node.onDrawBackground = function () {
       const r = _prevDrawBG ? _prevDrawBG.apply(this, arguments) : undefined;
+      node._aloraScroll?.sync();
       if (node.flags && node.flags.collapsed) return r;
       if (widget.y !== node._aloraLastY) {
         node._aloraLastY = widget.y;
@@ -1638,6 +1846,32 @@ async function attach(node) {
 // ---------------------------------------------------------------------------
 app.registerExtension({
   name: "AllBuy.LoRAStack",
+  async refreshComboInNodes(defs) {
+    // R 键及工具栏刷新共用此回调；直接使用本轮节点定义，绕过 5 秒旧缓存。
+    cachedObjectInfoAt = 0;
+    const [info] = await Promise.all([
+      defs?.[NODE_NAME] ? Promise.resolve(defs[NODE_NAME]) : getObjectInfo(),
+      loadGroups(),
+    ]);
+    if (info) {
+      cachedObjectInfo = info;
+      cachedObjectInfoAt = Date.now();
+    }
+    for (const node of app?.graph?._nodes || []) {
+      if (node?.type !== NODE_NAME && node?.comfyClass !== NODE_NAME) continue;
+      if (info) {
+        node._loraOptions = optionList(info, "lora_picker") || ["None"];
+        const type = node._modelType || findWidget(node, "模型类型")?.value || "UNET";
+        const key = type === "Checkpoint" ? "ckpt_name" : type === "GGUF" ? "gguf_name" : "unet_name";
+        node._aloraDropdowns?.[0]?.refresh(optionList(info, key) || ["None"],
+          findWidget(node, key)?.value || "None");
+      }
+      node._aloraPickerClose?.();
+      await node._aloraCatalog?.refresh().catch(() => {});
+      renderStack(node);
+      node._aloraGroupManagerRefresh?.();
+    }
+  },
   async setup() {
     setTimeout(() => {
       for (const node of app?.graph?._nodes || []) {
@@ -1668,8 +1902,12 @@ app.registerExtension({
     const onConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function () {
       if (onConfigure) onConfigure.apply(this, arguments);
+      this._aloraScroll?.restoreView();
       setTimeout(() => {
         hideAllWidgets(this);
+        this._aloraToolsReset?.();
+        this._aloraCatalog?.closeDialog();
+        this._aloraCatalog?.restoreView();
         // undo/重载工作流会整体换节点实例与 entries 数组，开着的弹层闭包引用旧 entry——
         // 先关掉防选择写进孤儿（本机前端 1.53.6 尚无 clear→onRemoved 派发，不会走 onRemoved 路径）
         try { this._aloraPickerClose?.(); } catch (_) {}
@@ -1680,8 +1918,20 @@ app.registerExtension({
         hideAllWidgets(this);
       }, 0);
     };
+    const onSerialize = nodeType.prototype.onSerialize;
+    nodeType.prototype.onSerialize = function (data) {
+      const result = onSerialize?.apply(this, arguments);
+      this._aloraScroll?.serialize(data);
+      return result;
+    };
     const onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function () {
+      this._aloraScroll?.destroy();
+      this._aloraScroll = null;
+      this._aloraToolsReset?.();
+      this._aloraCatalog?.destroy();
+      this._aloraGroupManagerClose?.();
+      this._stackDragCleanup?.();
       clearPendingStackWrite(this);
       try { this._aloraPickerClose?.(); } catch (_) {}
       // 摘掉各下拉的 document mousedown 监听与高度 ResizeObserver：

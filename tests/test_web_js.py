@@ -17,6 +17,55 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 
 class WebJsSyntaxTests(unittest.TestCase):
+    def test_lora_scroll_survives_canvas_switches(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过 LoRA 滚动位置检查")
+        script = os.path.join(os.path.dirname(__file__), "test_lora_scroll.mjs")
+        result = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_lora_multiselect_preserves_unselected_rows_and_validates_batches(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过 LoRA 多选检查")
+        script = os.path.join(os.path.dirname(__file__), "test_lora_multi_select.mjs")
+        result = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_library_rename_preserves_node_state(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过重命名检查")
+        script = os.path.join(os.path.dirname(__file__), "test_library_rename.mjs")
+        r = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_prompt_group_sorting_uses_exact_drop_position(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过拖拽排序检查")
+        script = os.path.join(os.path.dirname(__file__), "test_list_reorder.mjs")
+        r = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_library_list_height_stays_bounded(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过列表高度检查")
+        script = os.path.join(os.path.dirname(__file__), "test_library_height.mjs")
+        r = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_media_upload_uses_shared_storage(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过托管上传检查")
+        script = os.path.join(os.path.dirname(__file__), "test_managed_upload.mjs")
+        r = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_textbox_save_refreshes_matching_libraries(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过前端刷新检查")
+        script = os.path.join(os.path.dirname(__file__), "test_library_refresh.mjs")
+        r = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_every_web_js_parses_as_esm(self):
         if shutil.which("node") is None:
             self.skipTest("node 不在 PATH，跳过前端语法检查")

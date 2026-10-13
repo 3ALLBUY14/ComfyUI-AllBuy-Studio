@@ -5,6 +5,7 @@
 //   提示（→ image1..10）。样式沿用 .vpl-* 统一体系。
 import { app } from "../../scripts/app.js";
 import { installBypassSync, installExecutionLock, applyFillPanel, installFillResize, installCornerHover } from "./panel_guard.js";
+import { randomColor } from "./editor_dialog.js";
 
 const NODE_NAME = "AllBuyTextBox";
 const API = "/allbuy_promptlibrary";
@@ -111,7 +112,7 @@ async function userLibraries() {
     .map((x) => ({ name: x.name, display: x.display_name || x.name, count: x.count || 0 }));
 }
 
-function dialogShell(titleText, bodyBuild) {
+function dialogShell(titleText, bodyBuild, onClose) {
   const overlay = el("div", "vpl-overlay");
   const dialog = el("div", "vpl-dialog atb-dialog");
   overlay.appendChild(dialog);
@@ -123,6 +124,7 @@ function dialogShell(titleText, bodyBuild) {
   const body = el("div", "vpl-dialog-body");
   dialog.appendChild(body);
   const close = () => {
+    onClose?.();
     overlay.remove();
     document.removeEventListener("keydown", onKey, true);
   };
@@ -134,51 +136,292 @@ function dialogShell(titleText, bodyBuild) {
   return { overlay, close };
 }
 
+// 入库的分类/标签：已有建议可点选，也支持输入新值；切库时清空选择。
+function libraryMetadataPicker(kind) {
+  const root = el("div", "atb-metadata-picker");
+  const row = el("div", "vpl-row vpl-row-tight atb-metadata-input");
+  const input = el("input", "vpl-input");
+  input.type = "text";
+  input.placeholder = `输入${kind}后回车添加（可多选）`;
+  const selected = new Set();
+  let suggestions = [];
+  const chips = el("div", "vpl-chip-list atb-metadata-selected");
+  const choices = el("div", "vpl-chip-list atb-metadata-choices");
+  const render = () => {
+    chips.replaceChildren();
+    for (const value of selected) {
+      chips.appendChild(iconBtn(value + " ×", `移除${kind}：${value}`, () => {
+        selected.delete(value);
+        render();
+      }, "vpl-chip vpl-chip-removable"));
+    }
+    choices.replaceChildren();
+    for (const value of suggestions) {
+      const button = iconBtn((selected.has(value) ? "✓ " : "") + value, `选择${kind}：${value}`, () => {
+        if (selected.has(value)) selected.delete(value);
+        else selected.add(value);
+        render();
+      }, "vpl-chip vpl-chip-click");
+      button.setAttribute("aria-pressed", String(selected.has(value)));
+      choices.appendChild(button);
+    }
+    if (!suggestions.length) choices.appendChild(el("span", "atb-field-label", `暂无已有${kind}，可自行添加`));
+  };
+  const commit = () => {
+    input.value.split(/[,，]/).map((v) => v.trim()).filter(Boolean).forEach((v) => selected.add(v));
+    input.value = "";
+    render();
+  };
+  stopGraph(input);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === "," || e.key === "，") { e.preventDefault(); commit(); }
+  });
+  row.append(input, iconBtn("添加", `添加${kind}`, commit));
+  root.append(row, chips, choices);
+  return {
+    root,
+    reset(values = []) {
+      selected.clear();
+      input.value = "";
+      suggestions = [...new Set(values.filter((v) => typeof v === "string").map((v) => v.trim()).filter(Boolean))];
+      render();
+    },
+    values() { commit(); return [...selected]; },
+  };
+}
+
+// 预览文件先留在本地，确认入库时再上传；取消弹窗释放本地预览。
+function libraryPreviewPicker() {
+  const root = el("div", "atb-preview-grid");
+  const slots = {};
+  for (const kind of ["image", "video"]) {
+    const isVideo = kind === "video";
+    const title = isVideo ? "视频预览" : "截图预览";
+    const extensions = isVideo ? ["mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg", "mpeg"] : ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"];
+    const slot = el("div", "atb-preview-slot");
+    const head = el("div", "atb-preview-head");
+    const frame = el("div", "atb-preview-frame");
+    const hint = el("div", "atb-save-help", isVideo ? "选择或拖入视频" : "选择、拖入或 Ctrl+V 粘贴截图");
+    const input = el("input");
+    input.type = "file";
+    input.accept = extensions.map((ext) => "." + ext).join(",");
+    input.hidden = true;
+    let file = null;
+    let url = null;
+    let uploaded = null;
+    const release = () => {
+      const video = frame.querySelector("video");
+      if (video) { video.pause(); video.removeAttribute("src"); video.load(); }
+      frame.replaceChildren();
+      if (url) URL.revokeObjectURL(url);
+      url = null;
+    };
+    const setFile = (next) => {
+      if (next) {
+        const ext = (next.name || "").split(".").pop().toLowerCase();
+        if (!extensions.includes(ext)) { hint.textContent = `请选择${isVideo ? "视频" : "图片"}文件`; return; }
+        if (next.size > (isVideo ? 200 : 32) * 1024 * 1024) { hint.textContent = `${title}文件过大（上限 ${isVideo ? 200 : 32}MB）`; return; }
+      }
+      release();
+      file = next;
+      uploaded = null;
+      remove.disabled = !file;
+      if (file) {
+        url = URL.createObjectURL(file);
+        const media = el(isVideo ? "video" : "img");
+        media.src = url;
+        if (isVideo) { media.controls = true; media.muted = true; media.preload = "metadata"; }
+        else media.alt = "截图预览";
+        frame.appendChild(media);
+      } else frame.appendChild(el("span", "atb-save-help", "未添加"));
+      hint.textContent = file ? file.name : (isVideo ? "选择或拖入视频" : "选择、拖入或 Ctrl+V 粘贴截图");
+    };
+    const choose = iconBtn("选择", `选择${title}`, () => input.click());
+    const remove = iconBtn("移除", `移除${title}`, () => setFile(null));
+    head.append(el("span", "atb-field-label", title), choose, remove);
+    slot.append(head, frame, hint, input);
+    stopGraph(slot);
+    input.addEventListener("change", () => { if (input.files?.[0]) setFile(input.files[0]); input.value = ""; });
+    slot.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); slot.classList.add("dragover"); });
+    slot.addEventListener("dragleave", () => slot.classList.remove("dragover"));
+    slot.addEventListener("drop", (e) => {
+      e.preventDefault(); e.stopPropagation(); slot.classList.remove("dragover");
+      if (e.dataTransfer?.files?.[0]) setFile(e.dataTransfer.files[0]);
+    });
+    setFile(null);
+    root.appendChild(slot);
+    slots[kind] = {
+      setFile, release,
+      async upload(groupId) {
+        if (!file) return null;
+        if (uploaded) return uploaded;
+        const fd = new FormData();
+        fd.append("group_id", groupId);
+        fd.append("file", file, file.name);
+        const response = await fetch(API + "/cover/upload", { method: "POST", body: fd });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.ok || !(isVideo ? result.cover_video : result.cover)) {
+          throw new Error(result.error || `${title}上传失败`);
+        }
+        uploaded = result;
+        return result;
+      },
+    };
+  }
+  return {
+    root,
+    paste(e) {
+      const item = [...(e.clipboardData?.items || [])].find((item) => item.type.startsWith("image/"));
+      const file = item?.getAsFile() || [...(e.clipboardData?.files || [])].find((file) => file.type.startsWith("image/"));
+      if (!file) return;
+      e.preventDefault(); e.stopPropagation();
+      slots.image.setFile(file);
+    },
+    async upload(groupId) {
+      const video = await slots.video.upload(groupId);
+      const image = await slots.image.upload(groupId);
+      return { cover: image?.cover || video?.cover || "", coverVideo: video?.cover_video || "" };
+    },
+    dispose() { Object.values(slots).forEach((slot) => slot.release()); },
+  };
+}
+
 function saveToLibrary(text, onDone) {
+  const previews = libraryPreviewPicker();
+  const groupId = "atb-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   dialogShell("入库到提示词库", async (body, close) => {
-    const hint = el("div", "vpl-empty atb-hint", "当前文本将作为新提示词组加入所选用户库");
+    body.classList.add("atb-save-body");
+    body.parentElement.classList.add("atb-save-dialog");
+    body.addEventListener("paste", (e) => previews.paste(e));
+    const hint = el("div", "atb-save-intro", "当前文本将作为新提示词组入库，可选择分类与标签");
     const libSel = el("select", "vpl-input atb-select");
     libSel.appendChild(el("option", null, "加载用户库…")).value = "";
     const nameInput = el("input", "vpl-input");
     nameInput.type = "text";
     nameInput.placeholder = "新提示词组名称";
+    const categories = libraryMetadataPicker("分类");
+    const tags = libraryMetadataPicker("标签");
+    let color = randomColor();
+    const colorRow = el("div", "vpl-row vpl-row-tight atb-save-color");
+    const colorSwatch = el("span", "vpl-color-item");
+    const colorLabel = el("span", "atb-field-label");
+    const showColor = () => {
+      colorSwatch.style.background = color;
+      colorLabel.textContent = color;
+    };
+    showColor();
+    colorRow.append(colorSwatch, colorLabel, iconBtn("随机换色", "重新生成随机配色", () => { color = randomColor(); showColor(); }));
+    const loadHint = el("div", "atb-save-help");
+    let loadSeq = 0;
+    let loadedLib = null;
     stopGraph(libSel); stopGraph(nameInput);
-    const label = (n) => el("label", "atb-field-label", n);
+    const field = (title, control, help) => {
+      const wrap = el("div", "atb-save-field");
+      const label = el("label", "atb-field-label", title);
+      const input = control.matches("input, select") ? control : control.querySelector("input");
+      if (input) {
+        input.id = "atb-field-" + Math.random().toString(36).slice(2);
+        label.htmlFor = input.id;
+      }
+      wrap.append(label, control);
+      if (help) wrap.appendChild(help);
+      return wrap;
+    };
     const foot = el("div", "vpl-dialog-footer");
     const okBtn = iconBtn("入库", "保存到所选库", async () => {
       const lib = libSel.value;
       const gname = nameInput.value.trim();
       if (!lib || !gname) { okBtn.textContent = "✗ 需选库并填组名"; setTimeout(() => { okBtn.textContent = "入库"; }, 1200); return; }
+      if (loadedLib !== lib) return;
+      const selectedCategories = categories.values();
+      const selectedTags = tags.values();
       okBtn.disabled = true;
+      libSel.disabled = true;
+      body.inert = true;
       try {
         const loc = { source: "user", name: lib };
         const d = await apiGet("/library?locator=" + encodeURIComponent(JSON.stringify(loc)));
-        const data = (d && d.ok && d.library) ? d.library : { version: 1, name: lib, groups: [] };
-        data.groups = data.groups || [];
+        // 读取失败时不能用空库兜底再保存，否则会覆盖已有卡片。
+        if (!d?.ok || !d.library || !Array.isArray(d.library.groups)) throw new Error(d?.error || "读取库失败，请重试");
+        let data = d.library;
         if (data.groups.some((g) => (g.name || "").trim() === gname)) {
           okBtn.disabled = false;
+          libSel.disabled = false;
           okBtn.textContent = "✗ 同名组已存在";
           setTimeout(() => { okBtn.textContent = "入库"; }, 1500);
           return;
         }
+        okBtn.textContent = "正在入库…";
+        const media = await previews.upload(groupId);
+        if (media.cover || media.coverVideo) {
+          // 视频上传可能耗时较长，完成后重读库，保留上传期间新增的卡片。
+          const latest = await apiGet("/library?locator=" + encodeURIComponent(JSON.stringify(loc)));
+          if (!latest?.ok || !latest.library || !Array.isArray(latest.library.groups)) throw new Error(latest?.error || "读取库失败，请重试");
+          data = latest.library;
+          if (data.groups.some((g) => (g.name || "").trim() === gname)) throw new Error("同名组已存在");
+        }
         data.groups.push({
-          id: "atb-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-          name: gname, category: "", positive: text, negative: "", note: "",
-          color: "", weight: 1, prefix: "", suffix: "", tags: [], cover: "",
+          id: groupId,
+          name: gname, categories: selectedCategories, positive: text, negative: "", note: "",
+          color, weight: 1, prefix: "", suffix: "", tags: selectedTags, ...media,
         });
+        const meta = data.meta || (data.meta = {});
+        for (const [key, values] of [["categories", selectedCategories], ["tags", selectedTags]]) {
+          meta[key] = [...new Set([...(Array.isArray(meta[key]) ? meta[key] : []), ...values])];
+        }
         const saved = await apiPost("/library/save", { locator: loc, data });
         if (!saved || saved.ok !== true) throw new Error((saved && saved.error) || "保存失败");
+        // 保存落盘后立即通知当前画布的同库面板，避免继续显示或回写旧副本。
+        window.dispatchEvent(new CustomEvent("allbuy-promptlibrary-saved", { detail: { locator: loc } }));
         lastLibName = lib; // 入库成功也更新记忆：下次直接定位到这个库
         okBtn.textContent = "✓ 已入库";
         setTimeout(() => { close(); onDone && onDone(); }, 500);
       } catch (err) {
         okBtn.disabled = false;
+        libSel.disabled = false;
         okBtn.textContent = "✗ " + (err.message || "失败");
         setTimeout(() => { okBtn.textContent = "入库"; }, 1800);
+      } finally {
+        body.inert = false;
       }
     }, "vpl-btn-primary");
+    okBtn.disabled = true;
     foot.appendChild(okBtn);
-    body.append(hint, label("用户库"), libSel, label("提示词组名称"), nameInput, foot);
+    const basics = el("div", "atb-save-basics");
+    basics.append(field("用户库", libSel, loadHint), field("提示词组名称", nameInput));
+    body.append(hint, basics,
+      field("分类（可多选）", categories.root), field("标签（可多选）", tags.root),
+      field("自动随机配色", colorRow), field("预览素材（可选）", previews.root,
+        el("div", "atb-save-help", "只添加视频时自动使用首帧作为截图；也可单独指定截图。")));
+    body.after(foot);
+    const loadMetadata = async () => {
+      const seq = ++loadSeq;
+      const lib = libSel.value;
+      loadedLib = null;
+      okBtn.disabled = true;
+      categories.reset();
+      tags.reset();
+      categories.root.inert = tags.root.inert = true;
+      loadHint.textContent = "正在读取分类和标签…";
+      const loc = { source: "user", name: lib };
+      const d = await apiGet("/library?locator=" + encodeURIComponent(JSON.stringify(loc)));
+      if (seq !== loadSeq || !body.isConnected) return;
+      if (!d?.ok || !d.library || !Array.isArray(d.library.groups)) {
+        loadHint.replaceChildren(el("span", null, "读取库失败，请重试 "), iconBtn("重试", "重新读取分类和标签", loadMetadata));
+        return;
+      }
+      const data = d.library;
+      const meta = data.meta || {};
+      const list = (v) => Array.isArray(v) ? v : [];
+      categories.reset([...list(meta.categories), ...data.groups.flatMap((g) =>
+        Array.isArray(g.categories) && g.categories.length ? g.categories : (g.category ? [g.category] : []))]);
+      tags.reset([...list(meta.tags), ...data.groups.flatMap((g) => list(g.tags))]);
+      categories.root.inert = tags.root.inert = false;
+      loadHint.textContent = "";
+      loadedLib = lib;
+      okBtn.disabled = false;
+    };
+    libSel.addEventListener("change", loadMetadata);
     const libs = await userLibraries();
     libSel.innerHTML = "";
     if (!libs.length) {
@@ -198,8 +441,9 @@ function saveToLibrary(text, onDone) {
       libSel.appendChild(opt);
     }
     wireLibMemory(libSel, libs);
+    await loadMetadata();
     nameInput.focus();
-  });
+  }, () => previews.dispose());
 }
 
 function insertFromLibrary(onInsert) {
@@ -539,6 +783,10 @@ function attach(node) {
   });
   node._atbWidget = domWidget;
   domWidget.computeSize = () => [0, -4];
+  // 前端的 DOM widget 外壳仍可能比面板高，空白部分必须穿透到画布。
+  const markWrapper = () => container.closest(".dom-widget")?.classList.add("atb-fit-widget");
+  markWrapper();
+  requestAnimationFrame(markWrapper);
 
   [60, 250, 600].forEach((t) => setTimeout(() => recalcHeight(node), t));
   const ro = new ResizeObserver(() => recalcHeight(node));

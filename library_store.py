@@ -7,7 +7,7 @@ import threading
 
 from . import constants
 
-_write_lock = threading.Lock()
+_write_lock = threading.RLock()
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +239,36 @@ def create_library(name):
         raise FileExistsError(f"库已存在: {safe}")
     data = constants.make_empty_library(name)
     _atomic_write_json(path, data)
+    return {"source": "user", "name": safe}
+
+
+def rename_library(locator, name):
+    """更新用户库显示名，保留文件定位，已保存工作流与跨节点引用仍然有效。"""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("库名称不能为空")
+    name = name.strip()
+    loc = parse_locator(locator)
+    if loc.get("source", "user") != "user":
+        raise PermissionError("仅用户库可以重命名；只读库请先另存为用户库")
+    if not isinstance(loc.get("name"), str) or not loc["name"].strip():
+        raise ValueError("缺少库定位")
+    safe = _sanitize_filename(loc["name"])
+    reserved = {item.casefold() for item in _RESERVED_LIBRARY_NAMES}
+    if safe.casefold() in reserved or _sanitize_filename(name).casefold() in reserved:
+        raise ValueError("系统保留名不能用于提示词库")
+    path = _user_path(safe)
+    with _write_lock:
+        if not os.path.isfile(path):
+            raise FileNotFoundError("用户库不存在")
+        for entry in list_libraries():
+            if entry["source"] == "user" and entry["name"] != safe:
+                if name.casefold() in {entry["name"].casefold(), str(entry["display_name"]).casefold()}:
+                    raise FileExistsError(f"库名称已存在: {name}")
+        data = _read_json(path)
+        if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
+            raise ValueError("库数据格式错误，无法重命名")
+        data["name"] = name
+        _atomic_write_json(path, data)
     return {"source": "user", "name": safe}
 
 

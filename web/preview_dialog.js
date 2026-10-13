@@ -38,6 +38,7 @@ function h(tag, props = {}, children = []) {
   for (const [k, v] of Object.entries(props)) {
     if (k === "class") el.className = v;
     else if (k === "style") el.style.cssText = v;
+    else if (k === "html") el.innerHTML = v;
     else if (k.startsWith("on") && typeof v === "function") {
       el.addEventListener(k.slice(2).toLowerCase(), v);
     } else if (v !== null && v !== undefined) el.setAttribute(k, v);
@@ -191,10 +192,10 @@ export function mergeGroups(groups, selectedIds, separator = ", ", prepend = "",
 
 function openShell(title, body, width = 720) {
   const overlay = h("div", { class: "vpl-overlay" });
-  const dialog = h("div", { class: "vpl-dialog", style: `max-width:min(${width}px, calc(100vw - 32px))` });
+  const dialog = h("div", { class: "vpl-dialog vpl-preview-dialog", style: `max-width:min(${width}px, calc(100vw - 32px))` });
   const header = h("div", { class: "vpl-dialog-title" }, [
-    h("span", {}, title),
-    h("button", { class: "vpl-icon-btn", title: "关闭", onclick: () => closeDlg(), html: ICON_CLOSE }),
+    h("span", { title }, title),
+    h("button", { class: "vpl-icon-btn", type: "button", title: "关闭", "aria-label": "关闭预览", onclick: () => closeDlg(), html: ICON_CLOSE }),
   ]);
   const bodyWrap = h("div", { class: "vpl-dialog-body vpl-preview-body" }, [body]);
   dialog.appendChild(header);
@@ -230,7 +231,7 @@ export function previewGroup(group) {
   const cats = (Array.isArray(group.categories) && group.categories.length)
     ? group.categories.join(" / ") : (group.category || "");
   const media = buildPreviewMedia(group);
-  const body = h("div", {}, [
+  const body = h("div", { class: "vpl-preview-content" }, [
     media,
     h("div", { class: "vpl-preview-meta" }, [
       h("span", { class: "vpl-dot", style: `background:${group.color || "#888"}` }),
@@ -288,7 +289,7 @@ export function previewMerged({ groups, selectedIds, separator = ", ", prepend =
   const hasWildcard = [...posBlocks, ...negBlocks].some((b) => b.text.includes("{"))
     || prepend.includes("{") || append.includes("{");
 
-  const body = h("div", {}, [
+  const body = h("div", { class: "vpl-preview-content" }, [
     h("div", { class: "vpl-section-title" }, `已选 ${posBlocks.length} 组（按勾选顺序合并）`),
     blockView,
     hasWildcard ? h("div", { class: "vpl-hint" },

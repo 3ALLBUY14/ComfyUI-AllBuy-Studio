@@ -294,6 +294,7 @@
 
 /* ---------- 8. 列表区：透明底 + 卡片化列表项 ---------- */
 .vpl-list {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;                          /* 卡片之间的间距 */
@@ -304,8 +305,7 @@
   border: 1px solid var(--vpl-border);
   border-radius: var(--vpl-r-lg);
   background: var(--vpl-bg-panel);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  /* 列表位于画布 transform 内，滚动时避免再次创建背景模糊合成层。 */
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.18) transparent;
 }
@@ -321,10 +321,12 @@
 .vpl-list.vpl-list-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); /* 节点窄时自动降为单列 */
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 8px;
 }
 .vpl-list-cards .vpl-section-label { grid-column: 1 / -1; }
-.vpl-item-card {
+.vpl-list-cards .vpl-item-card {
   flex-direction: column;
   align-items: stretch;
   gap: 7px;
@@ -332,6 +334,7 @@
   min-width: 0;   /* grid item 默认 min-width:auto，长内容会把卡片顶出轨道压到相邻卡片 */
   overflow: hidden; /* 最终兜底：任何越界内容在卡片边界内裁剪 */
 }
+.vpl-list-cards .vpl-item-card > * { flex-shrink: 0; }
 .vpl-card-top { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
 .vpl-card-top .vpl-item-name { flex: 1; }
 /* 卡片内标签 chip 截断（分类 chip 已有 92px 兜底，标签此前漏了） */
@@ -377,6 +380,9 @@
 .vpl-item {
   position: relative;
   display: flex;
+  flex-shrink: 0;
+  min-height: 40px;
+  box-sizing: border-box;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -453,7 +459,16 @@
   0%, 100% { transform: scale(1); opacity: .7; }
   50% { transform: scale(1.22); opacity: 1; }
 }
-.vpl-drag-placeholder { visibility: hidden; }
+.vpl-drag-placeholder {
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  min-width: 0; box-sizing: border-box;
+  border: 1px dashed var(--vpl-primary); border-radius: var(--vpl-r-md);
+  background: var(--vpl-primary-soft); color: var(--vpl-primary);
+  font-size: 12px; pointer-events: auto;
+}
+.vpl-list .vpl-item.vpl-sort-source {
+  position: absolute; top: 0; left: 0; box-sizing: border-box; opacity: 0; pointer-events: none;
+}
 
 /* 自定义复选框 */
 .vpl-checkbox {
@@ -1128,9 +1143,14 @@
 .vpl-check-row .vpl-checkbox { width: 16px; height: 16px; }
 
 /* ---------- 13. 预览 ---------- */
-.vpl-preview-body { display: flex; flex-direction: column; gap: 20px; }
+.vpl-preview-dialog .vpl-dialog-title { flex-shrink: 0; gap: 16px; }
+.vpl-preview-dialog .vpl-dialog-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vpl-preview-body { min-height: 0; display: flex; flex-direction: column; gap: 20px; }
+.vpl-preview-content { display: flex; flex-direction: column; gap: 16px; flex-shrink: 0; min-width: 0; }
 .vpl-preview-meta {
   display: flex;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
   align-items: center;
   gap: 14px;
   font-size: 15.5px;
@@ -1158,6 +1178,10 @@
 .vpl-preview-block-head .vpl-btn { margin-left: auto; }
 .vpl-preview-block-label { font-weight: 600; color: var(--vpl-text); font-size: 14px; }
 .vpl-preview-text {
+  flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   background: var(--vpl-bg-inset);
   border: 1px solid var(--vpl-border);
   border-radius: var(--vpl-r-md);
@@ -2430,7 +2454,8 @@ body > .bips-lightbox-ghost { z-index: 10000; }
 /* DOM widget 外壳：事件穿透画布，仅 .alora-control 恢复交互。
    不设 overflow:hidden：三件套方案下外壳高度被前端归 0（widget.computeSize=[0,-4]），
    面板内容靠自身高度从这里溢出呈现，hidden 会把整个面板裁没 */
-.dom-widget.alora-fit-widget {
+.dom-widget.alora-fit-widget,
+.dom-widget.atb-fit-widget {
   pointer-events: none !important;
   box-sizing: border-box;
 }
@@ -2475,7 +2500,7 @@ body > .bips-lightbox-ghost { z-index: 10000; }
 
 /* 列表头 + LoRA 行 */
 .alora-list-head {
-  display: flex; align-items: center; gap: 6px; padding: 2px 0 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 0 0;
 }
 .alora-list-title { font-size: 12px; font-weight: 600; color: var(--vpl-text-muted); margin-right: auto; }
 /* 行筛选输入（≥6 行才显示，JS 控制）：紧凑单行 */
@@ -2484,7 +2509,114 @@ body > .bips-lightbox-ghost { z-index: 10000; }
 /* v3.99：堆栈预设导入/导出图标钮 */
 .alora-stack-io { flex: none; width: 22px; height: 22px; color: var(--vpl-text-muted); font-size: 12px; }
 .alora-stack-io svg { width: 13px; height: 13px; }
+.alora-list-head > button { flex: none; }
+.alora-clear { color: var(--vpl-danger, #ef7777); }
+.alora-undo-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 10px; font-size: 12px; color: var(--vpl-text);
+  background: var(--vpl-primary-softer); border: 1px solid var(--vpl-primary);
+  border-radius: var(--vpl-r-sm);
+}
+.alora-undo-bar[hidden] { display: none; }
+.alora-bulk-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 8px; background: var(--vpl-primary-softer);
+  border: 1px solid var(--vpl-border); border-radius: var(--vpl-r-md);
+}
+.alora-bulk-bar[hidden], .alora-row-select[hidden] { display: none !important; }
+.alora-bulk-bar .vpl-check-row { margin: 0; }
+.alora-bulk-bar .alora-bulk-weight { width: 82px; flex: none; padding: 4px 6px; height: 30px; }
+.alora-bulk-bar > button { padding: 5px 8px; }
+.alora-bulk-count { color: var(--vpl-text); font-size: 12px; }
+.alora-bulk-status { flex-basis: 100%; color: var(--vpl-text-muted); font-size: 12px; }
+.alora-bulk-status:empty { display: none; }
+.alora-bulk-status.error { color: var(--vpl-danger); }
+.alora-row-select { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.alora-select-mode .alora-row {
+  grid-template-columns: 18px 14px 26px 22px minmax(90px, 1fr) 118px 52px;
+}
+.alora-row.alora-selected, .alora-preset-editor-entry.alora-selected {
+  border-color: var(--vpl-primary); background: var(--vpl-primary-softer);
+}
+.alora-row.off.alora-selected { opacity: .8; }
+.alora-catalog-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.alora-catalog-toolbar .alora-rowfilter { flex: 1 1 130px; min-width: 110px; }
+.alora-catalog-select { width: auto; max-width: 160px; padding: 4px 6px; height: 30px; font-size: 12px; color-scheme: dark; }
+.alora-catalog-select option { background: #16181f; color: #f1f5fb; }
+:root[data-theme="light"] .alora-catalog-select,
+.litegraph.litegraph.litegraph.theme-light .alora-catalog-select { color-scheme: light; }
+:root[data-theme="light"] .alora-catalog-select option,
+.litegraph.litegraph.litegraph.theme-light .alora-catalog-select option { background: #fff; color: #1a1d24; }
+.alora-catalog-status { flex-basis: 100%; font-size: 12px; color: var(--vpl-danger); }
+.alora-catalog-status:empty { display: none; }
+.alora-row-tags, .alora-picker-tags { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.alora-row-tags { margin-top: 3px; }
+.vpl-btn.alora-tag-chip, .vpl-btn.alora-tag-edit {
+  max-width: 120px; padding: 1px 5px; height: 20px; font-size: 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vpl-btn.alora-tag-chip { border-color: var(--alora-tag-color); color: var(--alora-tag-color); }
+.vpl-btn.alora-tag-edit, .alora-tag-empty { color: var(--vpl-text-muted); font-size: 10px; }
+.alora-picker-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.alora-picker-controls > button { flex: none; }
+.alora-pop .alora-file { flex-wrap: wrap; }
+.alora-picker-tags { flex-basis: 100%; padding-left: 14px; }
+.alora-tag-dialog { width: min(700px, calc(100vw - 32px)); max-width: 700px; color: var(--vpl-text); }
+.alora-tag-body { display: flex; flex-direction: column; gap: 12px; }
+.alora-tag-description { font-size: 12px; color: var(--vpl-text-muted); overflow-wrap: anywhere; }
+.alora-tag-choices { display: flex; flex-wrap: wrap; gap: 8px; max-height: 280px; overflow-y: auto; }
+.alora-tag-option { display: flex; align-items: center; gap: 6px; padding: 6px 9px;
+  border: 1px solid var(--vpl-border); border-radius: var(--vpl-r-sm); cursor: pointer; }
+.alora-tag-list { max-height: 360px; overflow-y: auto; }
+.alora-tag-manage-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 8px 0; border-bottom: 1px solid var(--vpl-border); }
+.alora-tag-manage-row .alora-group-count { margin-right: auto; }
+.alora-tag-dialog [hidden] { display: none !important; }
+.alora-group-choice {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; margin-bottom: 4px;
+}
+.alora-group-count { flex: none; font-size: 11px; color: var(--vpl-text-muted); }
+.alora-presets-dialog {
+  width: min(760px, calc(100vw - 32px)); max-width: 760px; color: var(--vpl-text);
+}
+.alora-presets-body { display: flex; flex-direction: column; gap: 10px; }
+.alora-presets-save { display: flex; align-items: center; gap: 8px; }
+.alora-presets-save input { flex: 1; min-width: 0; }
+.alora-presets-save button { flex: none; }
+.alora-presets-list { max-height: 360px; overflow-y: auto; }
+.alora-presets-message { color: var(--vpl-text-muted); font-size: 12px; }
+.alora-presets-message:empty { display: none; }
+.alora-presets-message.error, .alora-preset-missing { color: var(--vpl-danger, #ef7777); }
+.alora-preset-row {
+  padding: 10px; margin-bottom: 6px; border-radius: var(--vpl-r-md);
+  border: 1px solid var(--vpl-border); background: var(--vpl-bg-card);
+}
+.alora-preset-heading { display: flex; align-items: center; gap: 10px; }
+.alora-preset-name { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--vpl-text); }
+.alora-preset-count { flex: none; font-size: 12px; color: var(--vpl-text-muted); }
+.alora-preset-summary {
+  margin: 6px 0; font-size: 12px; color: var(--vpl-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.alora-preset-missing { font-size: 12px; margin-bottom: 6px; }
+.alora-preset-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.alora-presets-dialog [hidden] { display: none !important; }
+.alora-preset-editor { display: flex; flex-direction: column; gap: 10px; }
+.alora-preset-editor-rows { max-height: 420px; overflow-y: auto; padding-right: 4px; }
+.alora-preset-editor-entry {
+  display: flex; flex-direction: column; gap: 8px; padding: 12px; margin-bottom: 8px;
+  background: var(--vpl-bg-card); border: 1px solid var(--vpl-border); border-radius: var(--vpl-r-md);
+}
+.alora-preset-editor-entry .alora-preset-heading { flex-wrap: wrap; }
+.alora-preset-editor-entry .vpl-check-row { margin: 0; }
+.alora-preset-editor-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.alora-preset-editor-label { font-size: 12px; color: var(--vpl-text-muted); }
+.alora-preset-editor-parameters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.alora-preset-editor-trigger { min-height: 64px; height: 64px; padding: 8px; font-size: 13px; }
+.alora-preset-editor-entry .alora-preset-missing:empty { display: none; }
 .alora-list {
+  position: relative;
   display: flex; flex-direction: column; gap: 4px;
   max-height: 400px; overflow-y: auto; padding: 4px;
   border: 1px solid var(--vpl-border); border-radius: var(--vpl-r-md);
@@ -2504,9 +2636,18 @@ body > .bips-lightbox-ghost { z-index: 10000; }
 }
 .alora-row:hover { background: var(--vpl-bg-card-hover); border-color: var(--vpl-border); box-shadow: 0 2px 8px rgba(0,0,0,.18); }
 .alora-row.off { opacity: .5; }
-.alora-row.alora-dragging { opacity: .45; }
-.alora-row.alora-drop-before { box-shadow: 0 -2px 0 0 var(--vpl-primary); }
-.alora-row.alora-drop-after { box-shadow: 0 2px 0 0 var(--vpl-primary); }
+.alora-row.alora-dragging {
+  opacity: 1; border: 1px dashed var(--vpl-primary);
+  background: var(--vpl-primary-softer); box-shadow: none;
+}
+.alora-row.alora-dragging > * { visibility: hidden; }
+.alora-row.alora-dragging::after {
+  content: "放置 LoRA"; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--vpl-primary); font-size: 12px; pointer-events: none;
+}
+.alora-range-row.alora-drag-details { border-style: dashed; }
+.alora-range-row.alora-drag-details > * { visibility: hidden; }
 
 /* 胶囊滑钮开关 */
 .alora-toggle {
@@ -2540,16 +2681,20 @@ body > .bips-lightbox-ghost { z-index: 10000; }
 .alora-name-btn:hover { border-color: var(--vpl-primary); }
 .alora-name-btn:focus { outline: none; border-color: var(--vpl-primary); box-shadow: var(--vpl-primary-glow); }
 
-/* 权重滑杆 + 数值徽标 */
+/* 权重滑杆 + 数值输入框 */
 .alora-slider { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .alora-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--vpl-primary); }
 .alora-val {
-  flex: none; min-width: 40px; text-align: right;
+  appearance: textfield; box-sizing: border-box;
+  flex: none; width: 44px; min-width: 0; text-align: right;
   font: 500 12px/1 var(--vpl-mono, ui-monospace, Consolas, monospace);
   font-variant-numeric: tabular-nums; color: var(--vpl-text);
   background: var(--vpl-bg-inset); border: 1px solid var(--vpl-border);
-  border-radius: 5px; padding: 3px 6px;
+  border-radius: 5px; padding: 3px;
 }
+.alora-val::-webkit-inner-spin-button,
+.alora-val::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.alora-val:focus { outline: none; border-color: var(--vpl-primary); box-shadow: var(--vpl-primary-glow); }
 /* 强度微调钮：数值右侧上下箭头小柱（比左右两钮省 ~30px 行宽；基类 .vpl-icon-btn 24px） */
 .alora-nudge-col { flex: none; display: flex; flex-direction: column; }
 .alora-slider .alora-nudge { width: 15px; height: 11px; color: var(--vpl-text-subtle); }
@@ -2562,6 +2707,7 @@ body > .bips-lightbox-ghost { z-index: 10000; }
    ========================================================================== */
 .atb-node { gap: 0; }
 .atb-panel {
+  position: relative; /* 将历史按钮定位在可见面板内 */
   display: flex; flex-direction: column; gap: 6px;
   box-sizing: border-box; /* 填充模式下声明的 px 高即渲染外沿高，padding/边框不再外溢出节点 */
   padding: 10px;
@@ -2620,6 +2766,73 @@ body > .bips-lightbox-ghost { z-index: 10000; }
   border-color: rgba(20, 24, 40, 0.28);
 }
 .atb-hint { margin-bottom: 4px; }
+.atb-save-dialog {
+  max-width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+}
+.atb-save-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  padding: 20px 24px 24px;
+}
+.atb-save-body > * { flex-shrink: 0; }
+.atb-save-intro, .atb-save-help {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vpl-text-muted);
+}
+.atb-save-field { display: flex; flex-direction: column; gap: 8px; }
+.atb-save-basics { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.atb-save-help:empty { display: none; }
+.atb-save-field > .atb-field-label { margin: 0; font-size: 12px; line-height: 1.5; }
+.atb-save-body .vpl-input { width: 100%; min-width: 0; box-sizing: border-box; }
+.atb-metadata-picker { display: flex; flex-direction: column; gap: 10px; }
+.atb-metadata-input { gap: 8px; }
+.atb-metadata-input .vpl-input { flex: 1; }
+.atb-metadata-input > .vpl-btn { flex: none; min-height: 36px; padding: 0 14px; }
+.atb-metadata-picker .vpl-chip-list { margin-top: 0; gap: 8px; }
+.atb-metadata-selected:empty { display: none; }
+.atb-metadata-choices { max-height: 120px; overflow-y: auto; padding: 2px 0; }
+.atb-metadata-choices .vpl-chip[aria-pressed="true"] {
+  border-color: var(--vpl-primary);
+  background: var(--vpl-primary-soft);
+}
+.atb-save-color {
+  gap: 10px;
+  padding: 12px;
+  min-height: 36px;
+  border: 1px solid var(--vpl-border);
+  border-radius: var(--vpl-r-md);
+  background: var(--vpl-bg-card);
+}
+.atb-save-color > .vpl-color-item { flex: none; margin: 0; }
+.atb-save-color > .atb-field-label { margin: 0; }
+.atb-save-color > .vpl-btn { margin-left: auto; }
+.atb-save-dialog > .vpl-dialog-footer { padding: 16px 24px; }
+.atb-save-dialog > .vpl-dialog-footer > .vpl-btn { min-width: 84px; min-height: 36px; }
+.atb-preview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.atb-preview-slot {
+  display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px;
+  border: 1px solid var(--vpl-border); border-radius: var(--vpl-r-md); background: var(--vpl-bg-card);
+}
+.atb-preview-slot.dragover { border-color: var(--vpl-primary); background: var(--vpl-primary-soft); }
+.atb-preview-head { display: flex; align-items: center; gap: 6px; }
+.atb-preview-head > .atb-field-label { flex: 1; margin: 0; }
+.atb-preview-head > .vpl-btn { flex: none; }
+.atb-preview-frame {
+  display: flex; align-items: center; justify-content: center; aspect-ratio: 16 / 9;
+  min-width: 0; overflow: hidden; border-radius: var(--vpl-r-sm); background: var(--vpl-bg-inset);
+}
+.atb-preview-frame > img, .atb-preview-frame > video { width: 100%; height: 100%; object-fit: contain; }
+.atb-preview-slot > .atb-save-help { overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .atb-preview-grid { grid-template-columns: minmax(0, 1fr); }
+  .atb-save-basics { grid-template-columns: minmax(0, 1fr); }
+  .atb-save-body { padding: 18px 16px; }
+  .atb-save-dialog > .vpl-dialog-footer { padding: 14px 16px; }
+}
 .atb-select { width: 100%; }
 /* 原生 select 的弹出层/滚动条跟随主题：不声明 color-scheme 时 Chromium 按浅色渲染
    选项列表，暗色页面上一片突兀的白；option 配色双保险 */
@@ -2819,6 +3032,8 @@ body > .bips-lightbox-ghost { z-index: 10000; }
   transition: opacity .14s ease, transform .14s ease;
 }
 .vpl-corner-actions.show { opacity: 1; pointer-events: auto; transform: none; }
+/* 隐藏父层的 pointer-events:none 不会覆盖按钮自身的 .alora-control。 */
+.atb-node .vpl-corner-actions:not(.show) .alora-control { pointer-events: none; }
 .vpl-corner-actions .vpl-btn {
   padding: 2px 8px; font-size: 12px;
   background: transparent; border: none; box-shadow: none;

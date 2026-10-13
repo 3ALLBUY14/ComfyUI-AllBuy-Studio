@@ -7,8 +7,8 @@
 - scale: 缩放设置，mode 取 none、longest、shortest、width、height，附 value 与 multiple
 - video_params / audio_params: 视频与音频的选区裁剪参数
 
-持久化：前端直接调用 ComfyUI 原生 upload 接口把素材复制进 input/allbuy_media/，
-后端不做任何写盘操作，只按清单只读解析；外部引用素材仅记录绝对路径。
+持久化：前端调用 /media/upload，由 asset_store 按内容哈希保存到 input/allbuy_media/，
+与提示词预览共用原文件；本模块按清单只读解析，旧文件与外部绝对路径引用仍兼容。
 
 现状（v3.58）：全部输出口可用——图片/遮罩 batch（逐张对齐）、视频选区帧序列
 （节点整段 batch 与导出流式共用选区逻辑）、帧率/帧计数/视频信息、音频裁剪与波形。

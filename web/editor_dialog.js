@@ -444,10 +444,8 @@ export function openEditor(group, { isNew = false, categories = [], palette = {}
     }
     renderTagPalette();
 
-    // v3.64：预览图 / 预览视频字段——文件名存 data.cover / data.coverVideo，实际文件经
-    // /cover/upload 落盘（后端按内容哈希命名，v3.71：内容变名字变，覆盖首帧图/
-    // 换视频后 URL 变，浏览器不会拿旧缓存）。移除只清字段：旧文件由整库保存时的
-    // 孤儿清理回收，所以取消编辑也不会留下错误引用。
+    // 预览字段保存内容哈希文件名，与素材节点共享原文件；移除只解除引用。
+    // 旧版 covers 文件仍兼容，新版托管文件不会被整库保存时的封面清理误删。
     const onCoverApplied = [];
     function buildMediaSlot({ kind, icon, accept, hint, getFile, apply }) {
       const isVideo = kind === "video";
@@ -549,14 +547,24 @@ export function openEditor(group, { isNew = false, categories = [], palette = {}
       getFile: () => data.coverVideo,
       apply: (j) => {
         data.coverVideo = j.cover_video || "";
-        if (j.cover) data.cover = j.cover; // 后端抽的首帧自动当预览图
+        data.coverVideoAssetId = j.cover_video ? (j.asset_id || "") : "";
+        data.coverVideoOriginalName = j.cover_video ? (j.original_name || "") : "";
+        if (j.cover) {
+          data.cover = j.cover; // 首帧按需生成，引用同一个视频文件
+          data.coverAssetId = j.asset_id || "";
+          data.coverOriginalName = j.original_name || "";
+        }
       },
     });
     const imgSlot = buildMediaSlot({
       kind: "image", icon: ICON_IMAGE, accept: COVER_IMG_ACCEPT,
       hint: "点击选择图片，或拖拽 / Ctrl+V 粘贴",
       getFile: () => data.cover,
-      apply: (j) => { data.cover = j.cover || ""; },
+      apply: (j) => {
+        data.cover = j.cover || "";
+        data.coverAssetId = j.cover ? (j.asset_id || "") : "";
+        data.coverOriginalName = j.cover ? (j.original_name || "") : "";
+      },
     });
     onCoverApplied.push(vidSlot.refresh, imgSlot.refresh);
 
@@ -569,7 +577,7 @@ export function openEditor(group, { isNew = false, categories = [], palette = {}
       vidSlot.el,
       imgSlot.el,
       h("div", { class: "vpl-media-col-note" },
-        "只传视频时自动取首帧当预览图；两窗可独立更换/移除。文件存 input/allbuy_covers/，随库引用，不占提示词输出。"),
+        "图片、视频与素材节点共用托管文件，相同内容只存一份；视频首帧按需预览。移动原文件不影响使用，移除仅解除引用。"),
     ]);
 
     function field(label, input, hint) {

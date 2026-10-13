@@ -4,8 +4,9 @@ import { api } from "../../scripts/api.js";
 import { openEditor, uid } from "./editor_dialog.js";
 import { previewGroup, previewMerged } from "./preview_dialog.js";
 import { installBypassSync, installExecutionLock, applyFillPanel, installFillResize } from "./panel_guard.js";
+import { installListReorder, reorderIds } from "./list_reorder.js";
 
-const PLUGIN_VERSION = "v3.127"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
+const PLUGIN_VERSION = "v3.139"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
 
 // ---------------------------------------------------------------------------
 // 注入样式表（ComfyUI 不会自动加载 WEB_DIRECTORY 下的 CSS，必须手动注入 link）
@@ -338,10 +339,23 @@ function locatorLabel(loc, libs) {
 // ---------------------------------------------------------------------------
 // 节点控制器
 // ---------------------------------------------------------------------------
-// v3.124：活跃主面板 controller 注册表——保存成功后通知同库兄弟节点重载磁盘数据。
+// 活跃提示词库 / 随机抽卡 controller：保存同步同库内容，重命名刷新库菜单。
 // 每个节点持有自己 init 时拉到的全量副本，兄弟不刷新时其后续任何编辑都会整库回写、
 // 静默覆盖先保存者的编辑（last-writer-wins 数据丢失）。
 const _activeLibControllers = new Set();
+
+// 文本框入库也会修改磁盘库，复用同库节点的刷新流程（含库计数、分类和标签）。
+function libraryKey(locator) {
+  return JSON.stringify([locator?.source, locator?.name, locator?.path]);
+}
+window.addEventListener("allbuy-promptlibrary-saved", (event) => {
+  const locator = event.detail?.locator;
+  if (!isValidLocator(locator) || locator.source !== "user") return;
+  const key = libraryKey(locator);
+  for (const controller of _activeLibControllers) {
+    if (controller.locKey() === key) controller.refresh();
+  }
+});
 
 function attachController(node) {
   // 不同前端版本下，onNodeCreated 触发时 INPUT_TYPES 对应的存储 widget 可能尚未创建。
@@ -444,12 +458,11 @@ function startController(node) {
   };
 
   const els = {};
-  let dragId = null;
   let loadSeq = 0; // 加载序号，防止异步加载竞态（工作流恢复时）
 
   // v3.124：注册本 controller（locator 随取随算——切库后按新 locator 匹配）；节点删除时注销
   const _ctl = {
-    locKey: () => JSON.stringify(state.locator),
+    locKey: () => libraryKey(state.locator),
     refresh: () => refreshFromWidgets(), // 函数声明在闭包尾部，提升可用
   };
   _activeLibControllers.add(_ctl);
@@ -642,7 +655,7 @@ function startController(node) {
     // v3.124：保存成功后让同库兄弟节点重载磁盘最新数据——它们的内存副本已陈旧，
     // 不刷新的话其下一次编辑会整库回写并静默覆盖本次保存。宁可重载（丢兄弟未保存的
     // 瞬时编辑）也不能让陈旧副本落盘；双开标签页场景留待 mtime/409 方案。
-    const myKey = JSON.stringify(state.locator);
+    const myKey = libraryKey(state.locator);
     for (const c of _activeLibControllers) {
       if (c !== _ctl && c.locKey() === myKey) c.refresh();
     }
@@ -734,6 +747,27 @@ function startController(node) {
 
   // 列表
   els.list = h("div", { class: "vpl-list" });
+  const listSorter = installListReorder(els.list, {
+    canDrop: (source, target) => {
+      const groups = state.libraryData?.groups || [];
+      const from = groups.find((g) => g.id === source.dataset.id);
+      const to = groups.find((g) => g.id === target.dataset.id);
+      // 收藏固定置顶；排序只在同一个收藏区域内进行。
+      return !!from && !!to && !!from.star === !!to.star;
+    },
+    onDrop: ({ fromId, toId, after }) => {
+      if (state.groupBy === "category") {
+        const groups = state.libraryData?.groups || [];
+        const from = groups.find((g) => g.id === fromId);
+        const to = groups.find((g) => g.id === toId);
+        const fromCats = from ? groupCats(from) : [];
+        const toCats = to ? groupCats(to) : [];
+        const cross = (fromCats.length || toCats.length) && !fromCats.some((cat) => toCats.includes(cat));
+        if (cross) { moveCrossGroup(fromId, toId, after); return; }
+      }
+      moveItem(fromId, toId, after);
+    },
+  });
   // v3.34：命名槽取值行（勾选的组含 {名称:选项} 时显示，位于筛选行与列表之间）
   els.varsBar = h("div", { class: "vpl-vars-bar" });
   els.varsBar.style.display = "none";
@@ -985,6 +1019,7 @@ function startController(node) {
   node.onRemoved = function () {
     _origOnRemoved?.apply(this, arguments);
     _activeLibControllers.delete(_ctl); // v3.124：注销，防止通知已删除节点
+    listSorter.destroy();
     closeMiniFloat();
     closeQuickEdit();
     closeWcPanel();
@@ -1021,7 +1056,7 @@ function startController(node) {
   //   - 强制 reflow 后读 scrollHeight（这时 scrollHeight = offsetHeight = 内容真实高度）
   //   - 恢复原 inline style
   let _lastGoodH = 460;
-  function realContentH(uncapped) {
+  function realContentH() {
     // 远缩放/节点离屏时前端会 display:none 隐藏 DOM 面板（容器高度归 0），
     // ResizeObserver / computeSize 仍会调到本函数；此时测量值无意义，
     // 返回上次可见时的缓存高度，防止节点高度被错误改写（拉远再拉回后尺寸不准的根因）
@@ -1029,23 +1064,18 @@ function startController(node) {
     // 填充类会放宽内部滚动区上限（vpl-list/vpl-rd-grid max-height:none），带着它量
     // 自然高会把内容高量成天文数字 → computeSize 把节点无限撑大 ↔ 填充收回复位
     // 来回打架 = 底部抽搐；测量必须始终在上限生效的口径下进行。
-    // uncapped=true 例外：豁免 vpl-list 480 上限按"全部组卡片完整可见"量——只用于
-    // 拖矮钳制下限（对齐随机抽卡 v3.118：节点拖不进切卡窗口）
     const hadFill = container.classList.contains("vpl-fill");
     if (hadFill) container.classList.remove("vpl-fill");
     const prevH = container.style.height;
     const prevMax = container.style.maxHeight;
-    const prevListMax = els.list.style.maxHeight;
     container.style.height = "auto";
     container.style.maxHeight = "none";
-    if (uncapped) els.list.style.maxHeight = "none";
     void container.offsetHeight; // 强制 reflow
     const h = container.scrollHeight;
-    els.list.style.maxHeight = prevListMax;
     container.style.height = prevH;
     container.style.maxHeight = prevMax;
     if (hadFill) container.classList.add("vpl-fill");
-    if (h > 0 && !uncapped) _lastGoodH = h;
+    if (h > 0) _lastGoodH = h;
     return h > 0 ? h : 460;
   }
 
@@ -1092,7 +1122,7 @@ function startController(node) {
   installFillResize(node, {
     el: () => container,
     chrome: chromeH,
-    floor: () => Math.max(_cachedTotalH || 0, _vplFloorH || 0),
+    floor: () => _cachedTotalH || 0,
     minWidth: NODE_WIDTH,
     margin: 8,
     onSettled: () => recalcHeight(),
@@ -1166,6 +1196,8 @@ function startController(node) {
     }
     // 操作项
     items.push({ group: "操作", label: "＋ 新建用户库…", value: "__create__" });
+    items.push({ group: "操作", label: "✎ 重命名当前用户库…", value: "__rename__",
+      disabled: state.locator?.source !== "user" });
     items.push({ group: "操作", label: "📥 导入文件（内嵌）…", value: "__import__" });
     items.push({ group: "操作", label: "📄 引用外部文件路径…", value: "__custom__" });
 
@@ -1380,6 +1412,7 @@ function startController(node) {
 
   function renderList() {
     const list = els.list;
+    listSorter.cancel();
     list.innerHTML = "";
     list.classList.toggle("vpl-list-cards", state.view === "card"); // v3.20：卡片视图切 grid 布局
     els.emptyDiag.innerHTML = "";
@@ -1809,37 +1842,6 @@ function startController(node) {
       }, [dragHandle, dot, body, actions].filter(Boolean));
     }
 
-    item.addEventListener("dragstart", (e) => {
-      dragId = g.id;
-      item.classList.add("vpl-dragging");
-      e.dataTransfer.effectAllowed = "move";
-    });
-    item.addEventListener("dragend", () => {
-      dragId = null;
-      item.classList.remove("vpl-dragging");
-      list.querySelectorAll(".vpl-dragover").forEach((el) => el.classList.remove("vpl-dragover"));
-    });
-    item.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-    });
-    item.addEventListener("dragenter", () => item.classList.add("vpl-dragover"));
-    item.addEventListener("dragleave", () => item.classList.remove("vpl-dragover"));
-    item.addEventListener("drop", (e) => {
-      e.preventDefault();
-      item.classList.remove("vpl-dragover");
-      if (!dragId || dragId === g.id) return;
-      // v3.28：分组视图下跨组拖=改该组分类；同组或单一流=局部重排
-      if (state.groupBy === "category") {
-        const fromG = (state.libraryData?.groups || []).find((x) => x.id === dragId);
-        const fromCats = fromG ? groupCats(fromG) : [];
-        const toCats = groupCats(g);
-        const cross = !fromCats.length || !toCats.length || !fromCats.some((c) => toCats.includes(c));
-        if (cross) { moveCrossGroup(dragId, g.id); return; }
-      }
-      moveItem(dragId, g.id);
-    });
-
     return item;
   }
 
@@ -1863,7 +1865,6 @@ function startController(node) {
   //     BOTTOM_GAP(18px 节点色底缝)——旧的写死 +50 正是“提示词库/随机抽卡底缝没变宽”的原因
   let _recalcPending = false;
   let _cachedTotalH = 0; // 填充模式下限：节点总高 = 内容 + chrome + 底缝（recalcHeight 维护）
-  let _vplFloorH = 0;    // 拖矮钳制下限：按"全部组卡片完整可见"（豁免 480 上限）量，卡片永不被窗口切
   function recalcHeight() {
     if (_recalcPending) return;
     _recalcPending = true;
@@ -1872,8 +1873,7 @@ function startController(node) {
       const h = realContentH();
       if (h <= 0) return;
       _cachedTotalH = h + chromeH() + BOTTOM_GAP;
-      const fu = realContentH(true);
-      if (fu > 0) _vplFloorH = fu + chromeH() + BOTTOM_GAP;
+      // 自动高度和拖矮下限统一使用限高后的列表；更多组在列表内滚动。
       // v3.25 修复「节点拉大后拉不回」：宽度沿用用户当前 node.size[0]（不记忆放大），
       // 保底 NODE_WIDTH 由 node.computeSize 负责；不再每帧用 Math.max 重设宽度，
       // 避免 ResizeObserver 反馈与 resize 手柄竞争导致缩小拖拽失效。
@@ -1956,7 +1956,7 @@ function startController(node) {
   }
 
   // v3.28：分组视图下跨组拖=把该组归入目标分类（自动归类）+ 重排顺序
-  async function moveCrossGroup(fromId, toId) {
+  async function moveCrossGroup(fromId, toId, after = false) {
     const groups = state.libraryData?.groups || [];
     const fromG = groups.find((x) => x.id === fromId);
     const toG = groups.find((x) => x.id === toId);
@@ -1965,14 +1965,11 @@ function startController(node) {
     const toCats = groupCats(toG);
     if (toCats.length) fromG.categories = [...toCats];
     else { fromG.categories = []; delete fromG.category; }
-    const from = state.unselectedIds.indexOf(fromId);
-    if (from !== -1) state.unselectedIds.splice(from, 1);
-    const to = state.unselectedIds.indexOf(toId);
-    state.unselectedIds.splice(to, 0, fromId);
+    state.unselectedIds = reorderIds(state.unselectedIds, fromId, toId, after);
     state.selectedIds = state.unselectedIds.filter((oid) => state.selectedIds.includes(oid));
-    await saveLibrary();
     syncWidgets();
     renderList();
+    await saveLibrary();
   }
 
   // v3.28：批量操作条渲染（bulkMode 时显示已选数 + 操作按钮）
@@ -2114,12 +2111,8 @@ function startController(node) {
   }
 
   // v3.22：单一列表拖拽重排（原 moveSelected/moveUnselected 合并，操作全量顺序数组）
-  function moveItem(fromId, toId) {
-    const from = state.unselectedIds.indexOf(fromId);
-    const to = state.unselectedIds.indexOf(toId);
-    if (from === -1 || to === -1) return;
-    state.unselectedIds.splice(from, 1);
-    state.unselectedIds.splice(to, 0, fromId);
+  function moveItem(fromId, toId, after = false) {
+    state.unselectedIds = reorderIds(state.unselectedIds, fromId, toId, after);
     state.selectedIds = state.unselectedIds.filter((oid) => state.selectedIds.includes(oid));
     syncWidgets();
     renderList();
@@ -2270,6 +2263,7 @@ function startController(node) {
 
   async function onLibraryChange(val) {
     if (val === "__create__") return createLibrary();
+    if (val === "__rename__") return renameLibrary();
     if (val === "__import__") return importFile();
     if (val === "__custom__") return referenceCustom();
     if (val === "__hidden_builtin__") { renderLibSelect(); return; }
@@ -2277,6 +2271,29 @@ function startController(node) {
       const loc = JSON.parse(val);
       await switchLibrary(loc, null);
     } catch (e) { /* ignore */ }
+  }
+
+  async function renameLibrary() {
+    if (state.locator?.source !== "user" || !state.libraryData) return;
+    const locator = { ...state.locator };
+    const currentName = state.libraryData.name || locator.name;
+    const input = prompt("重命名提示词库：", currentName);
+    if (input === null) return;
+    const name = input.trim();
+    if (!name) { alert("库名称不能为空"); return; }
+    if (name === currentName) return;
+    try {
+      const res = await apiPost("/library/rename", { locator, name });
+      if (!res.ok) { alert("重命名失败：" + (res.error || "未知错误")); return; }
+      if (libraryKey(state.locator) === libraryKey(locator)) {
+        state.libraryData.name = res.display_name;
+        syncWidgets();
+      }
+      // 文件定位保持不变；刷新全部库菜单，同时保留各节点的勾选与显示顺序。
+      for (const controller of _activeLibControllers) controller.refresh();
+    } catch (e) {
+      alert("重命名失败：" + e.message);
+    }
   }
 
   async function createLibrary() {
@@ -3416,10 +3433,13 @@ function startRandomController(node) {
     });
   }
   node._vplRdRefresh = refreshFromWidgets;
+  const rdController = { locKey: () => libraryKey(state.locator), refresh: refreshFromWidgets };
+  _activeLibControllers.add(rdController);
   // 节点删除时回收浮层（变量编辑浮层与合并结果弹窗挂 document.body，rAF/监听须手动停）
   const _origOnRemovedRd = node.onRemoved;
   node.onRemoved = function () {
     _origOnRemovedRd?.apply(this, arguments);
+    _activeLibControllers.delete(rdController);
     seedCleanup?.();
     closeRdQuickEdit();
     closeResultPop();
@@ -3468,4 +3488,3 @@ app.registerExtension({
     }
   },
 });
-

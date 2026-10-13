@@ -58,6 +58,10 @@ def checked_path(name):
 
 def resolve_cover_name(name):
     """同 checked_path 但不抛错：非法或文件不存在返回 ""（读取端点用）。"""
+    # New covers share originals with media nodes; legacy 16-digit covers stay readable.
+    from . import asset_store
+    if asset_store.is_managed_name(name):
+        return asset_store.resolve(name)
     try:
         target = checked_path(name)
     except ValueError:

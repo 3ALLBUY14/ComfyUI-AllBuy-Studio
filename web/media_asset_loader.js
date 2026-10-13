@@ -1,6 +1,6 @@
 // 素材加载节点前端：图片/音频/视频统一入料与选择面板（P1）
 //   入料：＋添加（文件/文件夹）、节点拖入、Ctrl+V（悬停时接管 paste），
-//         全部走 ComfyUI 原生 /upload/image 端点（subfolder=allbuy_media），XHR 带进度。
+//         走 /media/upload 内容去重端点，与提示词预览共用托管原文件，XHR 带进度。
 //   面板：图片/音频/视频三 Tab + JS 显式分列瀑布流（避开 CSS columns 碎片化）；
 //         图片多选（点选即生效，序号徽标 = batch 顺序，可拖拽改序）；音/视频单选。
 //   高度：照抄 bips 方案——domWidget.computeSize=[0,-4] + 缓存驱动 node.computeSize，
@@ -13,7 +13,7 @@ import { installBypassSync, installExecutionLock, applyFillPanel, clearFillPanel
 const API = "/allbuy_promptlibrary";
 const NODE_NAME = "MediaAssetLoader";
 const NODE_WIDTH = 470;
-const MEDIA_VERSION = "v1.34"; // 面板右下角版本号 + CSS/JS 缓存戳，随迭代递增（v1.1、v1.2…）
+const MEDIA_VERSION = "v1.35"; // 面板右下角版本号 + CSS/JS 缓存戳，随迭代递增（v1.1、v1.2…）
 const MEDIA_DIR = "allbuy_media";
 
 (function injectStyle() {
@@ -140,25 +140,23 @@ function probeLocal(file, type) {
   });
 }
 
-// 原生 /upload/image 上传（VHS 同款 XHR 带进度），成功返回 {name, abs}
-function uploadOne(file, onProgress, overwrite = false) {
+// 托管上传：后端按内容哈希复用原文件；原文件名只用于展示。
+function uploadOne(file, onProgress) {
   return new Promise((resolve, reject) => {
     const fd = new FormData();
-    fd.append("image", file);
-    fd.append("subfolder", MEDIA_DIR);
-    fd.append("type", "input");
-    fd.append("overwrite", overwrite ? "true" : "false");
+    fd.append("file", file, file.name || "paste.png");
     const req = new XMLHttpRequest();
-    req.open("POST", "/upload/image");
+    req.open("POST", API + "/media/upload");
     req.upload.addEventListener("progress", (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     });
     req.addEventListener("load", () => {
       try {
         const res = JSON.parse(req.responseText);
-        if (req.status !== 200 || res.error) { reject(new Error(res.error || ("HTTP " + req.status))); return; }
-        const sub = res.subfolder ? res.subfolder + "/" : "";
-        resolve({ name: res.name, rel: sub + res.name, type: res.type || "input" });
+        if (req.status !== 200 || !res.ok || !res.file || !res.asset_id) {
+          reject(new Error(res.error || ("HTTP " + req.status))); return;
+        }
+        resolve({ ...res, rel: res.file });
       } catch (e) { reject(e); }
     });
     req.addEventListener("error", () => reject(new Error("网络错误")));
@@ -285,17 +283,15 @@ function startMediaPanel(node, container, wManifest) {
     const seq = ++state.uploadSeq;
     showProgress(`正在导入 0/${accepted.length} …`);
     let done = 0;
-    const importOne = async (file, type, onProgress, overwrite) => {
-      const up = await uploadOne(file, onProgress, overwrite);
+    const importOne = async (file, type, onProgress) => {
+      const up = await uploadOne(file, onProgress);
       const meta = await probeLocal(file, type);
-      if (state.assets.some((a) => a.file === up.rel)) {
-        // 本分发 ComfyUI 对重名上传 overwrite=false 是静默保留原文件（返回原名不改名）：
-        // 同 rel 再入清单只会多一张指向旧内容的卡，跳过并提示
-        toast(`「${up.name}」已存在（同名保留原文件），已跳过`);
+      if (state.assets.some((a) => a.assetId === up.asset_id || a.file === up.rel)) {
+        toast(`「${file.name}」相同素材已在当前清单中，已复用`);
       } else {
         state.assets.push({
-          id: uid(), file: up.rel, name: up.name, type,
-          label: up.name, size: file.size, mtime: file.lastModified / 1000 || Date.now() / 1000,
+          id: uid(), assetId: up.asset_id, file: up.rel, name: up.name, type: up.type,
+          originalName: file.name, label: file.name, size: up.size, mtime: file.lastModified / 1000 || Date.now() / 1000,
           w: meta.w, h: meta.h, duration: meta.duration, fps: meta.fps,
         });
         if (type !== "image") probeAssetMeta(state.assets[state.assets.length - 1]);
@@ -307,11 +303,10 @@ function startMediaPanel(node, container, wManifest) {
         const onProgress = (p) =>
           showProgress(`正在导入 ${done + 1}/${accepted.length}：${file.name}（${Math.round(p * 100)}%）`);
         try {
-          await importOne(file, type, onProgress, false);
+          await importOne(file, type, onProgress);
         } catch (e) {
-          // 失败不再静默：上传中断会在目标位置留下半传残文件并被「同名保留」规则钉死，
-          // 用 overwrite=true 重传一次顶掉它；仍失败才计入汇总清单
-          try { await importOne(file, type, onProgress, true); }
+          // 上传只会原子发布完整文件，中断后可直接重试，不覆盖同名的其它素材。
+          try { await importOne(file, type, onProgress); }
           catch (e2) { console.warn("[MediaAsset] 上传失败：", file.name, e2); failedFiles.push(file.name); }
         }
         done++;

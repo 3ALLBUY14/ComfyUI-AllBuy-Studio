@@ -8,12 +8,13 @@ import io
 import math
 import os
 import re
+import tempfile
 from collections import OrderedDict
 
 from aiohttp import web
 from PIL import Image
 
-from . import library_store, constants, random_draw, batch_image_node, media_asset, cover, lora_groups_store
+from . import library_store, constants, random_draw, batch_image_node, media_asset, cover, lora_groups_store, lora_presets_store, lora_catalog_store, asset_store
 
 P = constants.API_PREFIX
 
@@ -140,6 +141,29 @@ async def create_library(request):
         return _json_error(e)
 
 
+@_post("/library/rename")
+async def rename_library(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_error("请求体不是合法 JSON")
+    if not isinstance(body, dict):
+        return _json_error("请求体必须是 JSON 对象")
+    if not isinstance(body.get("locator"), (dict, str)):
+        return _json_error("缺少库定位")
+    try:
+        locator = await asyncio.to_thread(library_store.rename_library, body["locator"], body.get("name"))
+        return web.json_response({"ok": True, "locator": locator, "display_name": body["name"].strip()})
+    except PermissionError as e:
+        return _json_error(e, 403)
+    except FileExistsError as e:
+        return _json_error(e, 409)
+    except FileNotFoundError as e:
+        return _json_error(e, 404)
+    except Exception as e:
+        return _json_error(e)
+
+
 @_post("/library/delete")
 async def delete_library(request):
     try:
@@ -220,6 +244,60 @@ async def lora_groups_save(request):
     try:
         saved = lora_groups_store.save_groups(data)
         return web.json_response({"ok": True, **saved})
+    except ValueError as e:
+        return _json_error(e, 400)
+    except PermissionError as e:
+        return _json_error(e, 403)
+    except Exception as e:  # noqa: BLE001
+        return _json_error(e)
+
+
+# ---------------------------------------------------------------------------
+# LoRA 标签
+# ---------------------------------------------------------------------------
+@_get("/lora_catalog")
+async def lora_catalog(request):
+    try:
+        return web.json_response({"ok": True, **lora_catalog_store.load_catalog()})
+    except Exception as e:  # noqa: BLE001
+        return _json_error(e)
+
+
+@_post("/lora_catalog/update")
+async def lora_catalog_update(request):
+    try:
+        data = await request.json()
+    except Exception:  # noqa: BLE001
+        return _json_error("请求体不是合法 JSON", 400)
+    try:
+        return web.json_response({"ok": True, **lora_catalog_store.update_catalog(data)})
+    except ValueError as e:
+        return _json_error(e, 400)
+    except PermissionError as e:
+        return _json_error(e, 403)
+    except Exception as e:  # noqa: BLE001
+        return _json_error(e)
+
+
+# ---------------------------------------------------------------------------
+# LoRA 列表储存
+# ---------------------------------------------------------------------------
+@_get("/lora_presets")
+async def lora_presets(request):
+    try:
+        return web.json_response({"ok": True, **lora_presets_store.load_presets()})
+    except Exception as e:  # noqa: BLE001
+        return _json_error(e)
+
+
+@_post("/lora_presets/update")
+async def lora_presets_update(request):
+    try:
+        data = await request.json()
+    except Exception:  # noqa: BLE001
+        return _json_error("请求体不是合法 JSON", 400)
+    try:
+        return web.json_response({"ok": True, **lora_presets_store.update_presets(data)})
     except ValueError as e:
         return _json_error(e, 400)
     except PermissionError as e:
@@ -353,70 +431,60 @@ async def serve_image(request):
 
 # ---------------------------------------------------------------------------
 # 提示词组封面端点（v3.64）：预览图 / 预览视频
-# 文件名由后端按文件内容哈希生成（cover.py，v3.71），库 JSON 只存文件名
+# 新上传通过 asset_store 与素材节点共用原文件，旧 covers 目录仍兼容读取。
 # ---------------------------------------------------------------------------
 _COVER_IMAGE_MAX = 32 * 1024 * 1024
 
 
-@_post("/cover/upload")
-async def cover_upload(request):
-    """封面上传（multipart: group_id + file）。图→重编码 JPEG；视频→内存缓冲后落盘（上限 200MB）再抽首帧当封面。
-
-    图片返回 cover（16 位 hex 的 jpg 文件名）；视频返回 cover（首帧名，可能为
-    null）与 cover_video（视频文件名）。cv2 缺失或首帧抽取失败时 cover 为 null，
-    前端回退占位图标。
-    """
+async def _receive_asset(request, *, preview=False):
+    """Stream uploads to a temporary file, then publish/deduplicate atomically."""
     try:
         reader = await request.multipart()
     except Exception:  # noqa: BLE001
         return _json_error("请求不是 multipart/form-data")
     group_id = ""
-    upload_ext = ""
     kind = ""
-    buf = bytearray()
+    filename = ""
     tmp_path = None
     try:
         async for part in reader:
             if part.name == "group_id":
                 group_id = (await part.text()).strip()
             elif part.name == "file":
-                upload_ext = os.path.splitext(part.filename or "")[1].lower()
-                if upload_ext in media_asset.IMAGE_EXTS:
-                    kind = "image"
-                    limit = _COVER_IMAGE_MAX
-                elif upload_ext in media_asset.VIDEO_EXTS:
-                    kind = "video"
-                    limit = cover.VIDEO_MAX_BYTES
-                else:
-                    return _json_error(f"不支持的文件类型: {upload_ext or '(无扩展名)'}")
-                while True:
-                    chunk = await part.read_chunk(65536)
-                    if not chunk:
-                        break
-                    buf.extend(chunk)
-                    if len(buf) > limit:
-                        label = "图片过大（上限 32MB）" if kind == "image" else "视频过大（上限 200MB）"
-                        return _json_error(label)
-        if not group_id:
+                if tmp_path:
+                    return _json_error("每次只能上传一个文件")
+                filename = part.filename or ""
+                kind = media_asset.asset_type(filename)
+                if not kind or (preview and kind == "audio"):
+                    return _json_error("不支持的文件类型")
+                limit = (_COVER_IMAGE_MAX if kind == "image" else cover.VIDEO_MAX_BYTES) if preview else None
+                with tempfile.NamedTemporaryFile(prefix=".upload-", suffix=".tmp", delete=False,
+                                                 dir=asset_store.root()) as tmp:
+                    tmp_path = tmp.name
+                    size = 0
+                    while True:
+                        chunk = await part.read_chunk(1 << 20)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if limit is not None and size > limit:
+                            label = "图片过大（上限 32MB）" if kind == "image" else "视频过大（上限 200MB）"
+                            return _json_error(label)
+                        await asyncio.to_thread(tmp.write, chunk)
+        if preview and not group_id:
             return _json_error("缺少 group_id")
-        if not kind:
+        if not tmp_path:
             return _json_error("缺少 file 字段")
-        if kind == "image":
-            name = await asyncio.to_thread(cover.save_image, bytes(buf))
-            return web.json_response({"ok": True, "cover": name, "cover_video": None})
-        import tempfile
-        # 临时文件必须与目标同目录（跨盘符 os.replace 会 WinError 17）
-        with tempfile.NamedTemporaryFile(suffix=upload_ext or ".mp4", delete=False,
-                                         dir=cover.covers_root()) as tmp:
-            tmp.write(bytes(buf))
-            tmp_path = tmp.name
-        video_name, cover_name = await asyncio.to_thread(
-            cover.save_video, tmp_path, upload_ext)
-        return web.json_response({"ok": True, "cover": cover_name, "cover_video": video_name})
+        saved = await asyncio.to_thread(asset_store.import_file, tmp_path, filename, consume_upload=True)
+        if preview:
+            # The video itself is also the poster reference; /cover/file extracts
+            # its first frame into the existing memory cache without another file.
+            saved.update(cover=saved["name"], cover_video=saved["name"] if kind == "video" else None)
+        return web.json_response({"ok": True, **saved})
     except ValueError as e:
         return _json_error(e)
     except Exception as e:  # noqa: BLE001
-        return _json_error(f"封面上传失败：{e}", 500)
+        return _json_error(f"素材上传失败：{e}", 500)
     finally:
         if tmp_path:
             try:
@@ -425,12 +493,25 @@ async def cover_upload(request):
                 pass
 
 
+@_post("/cover/upload")
+async def cover_upload(request):
+    return await _receive_asset(request, preview=True)
+
+
+@_post("/media/upload")
+async def media_upload(request):
+    return await _receive_asset(request)
+
+
 @_get("/cover/file")
 async def cover_file(request):
     """返回封面图（name 为 cover 字段里的文件名，白名单校验在 cover.resolve_cover_name）。"""
     path = cover.resolve_cover_name(request.query.get("name", ""))
     if not path:
         return web.Response(status=404, text="not found")
+    if media_asset.asset_type(path) == "video":
+        # Only managed video references use this route as an on-demand poster.
+        return await media_vthumb(request)
     try:
         w = int(request.query.get("w", "0") or 0)
     except ValueError:
