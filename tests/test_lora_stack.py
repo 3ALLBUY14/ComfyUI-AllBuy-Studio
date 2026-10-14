@@ -13,6 +13,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _pkg = types.ModuleType("vpl")
@@ -227,6 +228,76 @@ class ISChangedTests(unittest.TestCase):
         c = self._changed(stack_json=json.dumps([{"name": "nope.safetensors", "weight": 0.5}]))
         d = self._changed(stack_json=json.dumps([{"name": "nope.safetensors", "weight": 0.5, "trigger": "t"}]))
         self.assertNotEqual(c, d)
+
+
+class AuxiliaryLoaderTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        calls = self.calls
+
+        class ClipLoader:
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"clip_name": (["encoder.safetensors"],), "type": (["stable_diffusion", "minimax"],)}}
+
+            def load_clip(self, name, clip_type):
+                calls.append(("clip", name, clip_type))
+                return ("CUSTOM_CLIP",)
+
+        class VaeLoader:
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"vae_name": (["vae.safetensors", "pixel_space"],)}}
+
+            def load_vae(self, name):
+                calls.append(("vae", name))
+                return ("CUSTOM_VAE",)
+
+        self.loaders = {"CLIPLoader": ClipLoader, "VAELoader": VaeLoader}
+        self.core = patch.object(lora, "_comfy_nodes", return_value=types.SimpleNamespace(NODE_CLASS_MAPPINGS=self.loaders))
+        self.core.start()
+        self.addCleanup(self.core.stop)
+
+    def run_stack(self, **kwargs):
+        with patch.object(lora.AllBuyLoRAStack, "_load_base_model", return_value=("MODEL", "BASE_CLIP", "BASE_VAE")), \
+                patch.object(lora.AllBuyLoRAStack, "_apply_loras", side_effect=lambda model, entries: model):
+            return lora.AllBuyLoRAStack().run("Checkpoint", "base", "None", "None", "None", "[]", **kwargs)
+
+    def test_old_workflows_keep_checkpoint_outputs(self):
+        self.assertEqual(self.run_stack(), ("MODEL", "BASE_CLIP", "BASE_VAE", ""))
+        self.assertEqual(self.run_stack(clip_name="None", vae_name="None"), ("MODEL", "BASE_CLIP", "BASE_VAE", ""))
+        self.assertEqual(self.calls, [])
+
+    def test_selected_loaders_supply_outputs_and_forward_type(self):
+        self.assertEqual(self.run_stack(clip_name="encoder.safetensors", clip_type="minimax", vae_name="pixel_space"),
+                         ("MODEL", "CUSTOM_CLIP", "CUSTOM_VAE", ""))
+        self.assertEqual(self.calls, [("clip", "encoder.safetensors", "minimax"), ("vae", "pixel_space")])
+
+    def test_one_override_preserves_the_other_output(self):
+        self.assertEqual(self.run_stack(vae_name="vae.safetensors"), ("MODEL", "BASE_CLIP", "CUSTOM_VAE", ""))
+
+    def test_unet_can_return_independent_clip_and_vae(self):
+        with patch.object(lora.AllBuyLoRAStack, "_load_base_model", return_value=("MODEL", None, None)), \
+                patch.object(lora.AllBuyLoRAStack, "_apply_loras", side_effect=lambda model, entries: model):
+            result = lora.AllBuyLoRAStack().run("UNET", "None", "unet", "None", "None", "[]",
+                                              clip_name="encoder.safetensors", vae_name="vae.safetensors")
+        self.assertEqual(result, ("MODEL", "CUSTOM_CLIP", "CUSTOM_VAE", ""))
+
+    def test_schema_uses_native_choices_and_appends_widgets(self):
+        folder = types.SimpleNamespace(get_filename_list=lambda key: [])
+        with patch.object(lora, "_folder_paths", return_value=folder):
+            schema = lora.AllBuyLoRAStack.INPUT_TYPES()
+        optional = schema["optional"]
+        self.assertEqual(list(optional)[-3:], ["clip_name", "clip_type", "vae_name"])
+        self.assertEqual(optional["clip_name"][0], ["None", "encoder.safetensors"])
+        self.assertEqual(optional["clip_type"][0], ["stable_diffusion", "minimax"])
+        self.assertIn("pixel_space", optional["vae_name"][0])
+
+    def test_selection_and_type_invalidate_execution_cache(self):
+        base = dict(模型类型="UNET", ckpt_name="None", unet_name="model", gguf_name="None", lora_picker="None", stack_json="[]")
+        initial = lora.AllBuyLoRAStack.IS_CHANGED(**base)
+        for selection in ({"clip_name": "encoder.safetensors"}, {"clip_type": "minimax"}, {"vae_name": "pixel_space"}):
+            self.assertNotEqual(initial, lora.AllBuyLoRAStack.IS_CHANGED(**base, **selection))
 
 
 class LoadBaseModelTests(unittest.TestCase):

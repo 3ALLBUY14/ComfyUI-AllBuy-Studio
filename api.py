@@ -15,6 +15,7 @@ from aiohttp import web
 from PIL import Image
 
 from . import library_store, constants, random_draw, batch_image_node, media_asset, cover, lora_groups_store, lora_presets_store, lora_catalog_store, asset_store
+from . import lora_preview_store
 
 P = constants.API_PREFIX
 
@@ -282,6 +283,80 @@ async def lora_catalog_update(request):
 # ---------------------------------------------------------------------------
 # LoRA 列表储存
 # ---------------------------------------------------------------------------
+@_get("/lora_previews")
+async def lora_previews(request):
+    try:
+        data = await asyncio.to_thread(lora_preview_store.list_previews)
+        return web.json_response({"ok": True, **data})
+    except Exception as e:  # noqa: BLE001
+        return _json_error(e, 500)
+
+
+@_post("/lora_previews/update")
+async def lora_previews_update(request):
+    try:
+        body = await request.json()
+        preview = await asyncio.to_thread(lora_preview_store.update_preview, body)
+        return web.json_response({"ok": True, "preview": preview})
+    except FileNotFoundError as e:
+        return _json_error(e, 404)
+    except (ValueError, TypeError) as e:
+        return _json_error(e)
+    except Exception as e:  # noqa: BLE001
+        return _json_error(e, 500)
+
+
+def _encode_lora_poster(path, width):
+    import cv2
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            return None
+        ok, frame = cap.read()
+        if not ok:
+            return None
+        height, original_width = frame.shape[:2]
+        scale = min(1, width / max(height, original_width))
+        if scale < 1:
+            frame = cv2.resize(frame, (max(1, round(original_width * scale)), max(1, round(height * scale))))
+        ok, data = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        return data.tobytes() if ok else None
+    finally:
+        cap.release()
+
+
+@_get("/lora_preview/file")
+async def lora_preview_file(request):
+    try:
+        kind = request.query.get("kind", "image")
+        path = await asyncio.to_thread(lora_preview_store.resolve_preview, request.query.get("model"), kind)
+        width = max(0, min(1920, int(request.query.get("w", "0"))))
+        if kind == "video" and request.query.get("poster") == "1":
+            stamp = await asyncio.to_thread(os.stat, path)
+            key = (path, width or 480, "lora-poster", stamp.st_mtime_ns, stamp.st_size)
+            data = _VTHUMB_CACHE.get(key)
+            if data is None:
+                data = await asyncio.to_thread(_encode_lora_poster, path, width or 480)
+                if not data:
+                    return web.Response(status=404, text="video preview unavailable")
+                _VTHUMB_CACHE[key] = data
+            _VTHUMB_CACHE.move_to_end(key)
+            while len(_VTHUMB_CACHE) > _VTHUMB_CACHE_MAX:
+                _VTHUMB_CACHE.popitem(last=False)
+            return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+        if kind == "image" and width:
+            return await _image_response(path, width)
+        return web.FileResponse(path, headers={"Cache-Control": "private, max-age=3600"})
+    except FileNotFoundError:
+        return web.Response(status=404, text="preview not found")
+    except (ValueError, TypeError) as e:
+        return _json_error(e)
+    except ImportError:
+        return web.Response(status=404, text="video poster decoder unavailable")
+    except Exception as e:  # noqa: BLE001
+        return _json_error(e, 500)
+
+
 @_get("/lora_presets")
 async def lora_presets(request):
     try:

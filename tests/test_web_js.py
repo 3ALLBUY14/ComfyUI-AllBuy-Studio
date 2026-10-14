@@ -17,6 +17,20 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 
 class WebJsSyntaxTests(unittest.TestCase):
+    def test_fullscreen_manager_filters_and_workflow_adapters(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过全屏管理检查")
+        script = os.path.join(os.path.dirname(__file__), "test_manager.mjs")
+        result = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_library_picker_search_and_preferences(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH，跳过库菜单检查")
+        script = os.path.join(os.path.dirname(__file__), "test_library_picker.mjs")
+        result = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_lora_scroll_survives_canvas_switches(self):
         if shutil.which("node") is None:
             self.skipTest("node 不在 PATH，跳过 LoRA 滚动位置检查")

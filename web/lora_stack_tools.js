@@ -48,6 +48,7 @@ async function presetsRequest(action) {
     throw new Error(response.status === 404 ? "请重启 ComfyUI，加载列表储存接口" : data.error || `HTTP ${response.status}`);
   }
   if (!Array.isArray(data.presets)) throw new Error("列表储存数据格式错误");
+  if (action) window.dispatchEvent(new CustomEvent("allbuy-lora-data-changed", { detail: { origin: "node" } }));
   return data.presets;
 }
 
@@ -310,6 +311,7 @@ export function installStackTools(node, hooks) {
       close();
     };
     const updateView = () => {
+      dialog.classList.toggle("alora-presets-editing", !!editing);
       saveRow.hidden = search.hidden = list.hidden = refreshBtn.hidden = !!editing;
       editor.hidden = !editing;
       titleLabel.textContent = editing ? `编辑列表 · ${editing.name}` : "LoRA 列表储存";

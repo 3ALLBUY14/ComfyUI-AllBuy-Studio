@@ -5,8 +5,10 @@ import { openEditor, uid } from "./editor_dialog.js";
 import { previewGroup, previewMerged } from "./preview_dialog.js";
 import { installBypassSync, installExecutionLock, applyFillPanel, installFillResize } from "./panel_guard.js";
 import { installListReorder, reorderIds } from "./list_reorder.js";
+import { installLibraryPicker } from "./library_picker.js";
+import { promptApplication } from "./manager_data.js";
 
-const PLUGIN_VERSION = "v3.139"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
+const PLUGIN_VERSION = "v3.146"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
 
 // ---------------------------------------------------------------------------
 // 注入样式表（ComfyUI 不会自动加载 WEB_DIRECTORY 下的 CSS，必须手动注入 link）
@@ -349,6 +351,7 @@ function libraryKey(locator) {
   return JSON.stringify([locator?.source, locator?.name, locator?.path]);
 }
 window.addEventListener("allbuy-promptlibrary-saved", (event) => {
+  if (event.detail?.origin === "node") return; // Node saves already refresh siblings below.
   const locator = event.detail?.locator;
   if (!isValidLocator(locator) || locator.source !== "user") return;
   const key = libraryKey(locator);
@@ -659,6 +662,7 @@ function startController(node) {
     for (const c of _activeLibControllers) {
       if (c !== _ctl && c.locKey() === myKey) c.refresh();
     }
+    window.dispatchEvent(new CustomEvent("allbuy-promptlibrary-saved", { detail: { locator: state.locator, origin: "node" } }));
   }
 
   // -------------------------------------------------------------------------
@@ -685,7 +689,7 @@ function startController(node) {
   });
 
   // 库选择行：v3.1 改用自定义玻璃下拉（浏览器原生 select 弹出层无法跨平台重写样式）
-  const libDD = createDropdown();
+  const libDD = installLibraryPicker(createDropdown());
   els.libSelect = libDD.trigger;        // 保留旧接口名，下游可继续用 .value
   els.libPanel = libDD.panel;
   libDD.addEventListener("change", (v) => onLibraryChange(v));
@@ -1020,6 +1024,7 @@ function startController(node) {
     _origOnRemoved?.apply(this, arguments);
     _activeLibControllers.delete(_ctl); // v3.124：注销，防止通知已删除节点
     listSorter.destroy();
+    libDD.destroy();
     closeMiniFloat();
     closeQuickEdit();
     closeWcPanel();
@@ -1201,6 +1206,7 @@ function startController(node) {
     items.push({ group: "操作", label: "📥 导入文件（内嵌）…", value: "__import__" });
     items.push({ group: "操作", label: "📄 引用外部文件路径…", value: "__custom__" });
 
+    libDD.setValueSilent(state.locator ? JSON.stringify(state.locator) : "");
     libDD.setItems(items);
 
     // 同步按钮显示文字为当前选中项
@@ -2445,6 +2451,23 @@ function startController(node) {
   }
 
   node._vplRefresh = refreshFromWidgets;
+  node._allbuyManagerContainer = container;
+  node._allbuyManagerApply = async ({ locator, ids, append = true }) => {
+    await node._allbuyManagerReady;
+    // Fetch first; a failed request must leave the workflow selection untouched.
+    const result = await apiGet("/library?locator=" + encodeURIComponent(JSON.stringify(locator)));
+    if (!result.ok || !Array.isArray(result.library?.groups)) throw new Error(result.error || "无法读取提示词库");
+    const selection = promptApplication(state, locator, result.library.groups, ids, append);
+    state.locator = { ...locator };
+    state.libraryData = result.library;
+    Object.assign(state, selection);
+    state.categories = []; state.tagsFilter = []; state.search = "";
+    if (els.search) els.search.value = "";
+    syncWidgets();
+    await loadLibraries();
+    renderAll();
+    node.graph?.change?.();
+  };
   // 若 onConfigure 在控制器就绪前已触发，补一次刷新——
   // 推迟到下一个 microtask，必须让 init() 先把 state.libraryData 落地，避免
   // refreshFromWidgets 内的 readWidgets 抢占未加载状态。
@@ -2453,7 +2476,7 @@ function startController(node) {
     Promise.resolve().then(refreshFromWidgets);
   }
 
-  init();
+  node._allbuyManagerReady = init();
 }
 
 // ---------------------------------------------------------------------------
@@ -2779,7 +2802,7 @@ function startRandomController(node) {
   // ---- DOM 构建 ----
   const container = h("div", { class: "vpl-node vpl-rd-node" });
 
-  const libDD = createDropdown({ placeholder: "选择库…" });
+  const libDD = installLibraryPicker(createDropdown({ placeholder: "选择库…" }));
   libDD.addEventListener("change", (val) => {
     state.locator = parseLocatorStr(val);
     syncWidgets();
@@ -3440,6 +3463,7 @@ function startRandomController(node) {
   node.onRemoved = function () {
     _origOnRemovedRd?.apply(this, arguments);
     _activeLibControllers.delete(rdController);
+    libDD.destroy();
     seedCleanup?.();
     closeRdQuickEdit();
     closeResultPop();

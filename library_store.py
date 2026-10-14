@@ -160,7 +160,7 @@ def save_library(locator, data):
     if readonly:
         raise PermissionError("内置库 / 自定义路径库为只读，无法保存")
     loc = parse_locator(locator)
-    if loc.get("source", "user") == "user" and _sanitize_filename(loc.get("name") or "") in _RESERVED_LIBRARY_NAMES:
+    if loc.get("source", "user") == "user" and _is_reserved_library_name(loc.get("name") or ""):
         raise ValueError(f"库名 {loc.get('name')} 是系统保留名，无法保存")
     if not isinstance(data, dict):
         raise ValueError("库数据格式错误")
@@ -188,8 +188,8 @@ def list_libraries():
             if fn.endswith(".backup") or fn.endswith(".tmp"):
                 continue
             name = fn[:-5]
-            if name in _RESERVED_LIBRARY_NAMES:
-                continue  # lora_groups.json 与 LoRA 分组存储共用同一文件，绝不能当用户库暴露
+            if _is_reserved_library_name(name):
+                continue  # 共享目录中的 LoRA 配置文件不属于提示词库。
             count = 0
             display = name
             try:
@@ -221,18 +221,23 @@ def all_library_paths():
         except OSError:
             continue
         for fn in names:
-            if fn.endswith(".json"):  # .backup / .tmp 后缀天然不匹配
+            if fn.lower().endswith(".json") and not _is_reserved_library_name(fn[:-5]):
                 paths.append(os.path.join(folder, fn))
     return paths
 
 
-_RESERVED_LIBRARY_NAMES = {"lora_groups"}  # 与 lora_groups_store 的分组存储同名会共用同一 json 互相覆盖
+# 与各 LoRA store 共用目录，必须从库扫描及提示词库写操作中排除。
+_RESERVED_LIBRARY_NAMES = {"lora_groups", "lora_catalog", "lora_presets", "lora_previews"}
+
+
+def _is_reserved_library_name(name):
+    return _sanitize_filename(name).casefold() in _RESERVED_LIBRARY_NAMES
 
 
 def create_library(name):
     """在用户目录创建新库，返回 locator。"""
     safe = _sanitize_filename(name)
-    if safe in _RESERVED_LIBRARY_NAMES:
+    if _is_reserved_library_name(safe):
         raise ValueError(f"库名 {safe} 是系统保留名，请换一个")
     path = _user_path(safe)
     if os.path.isfile(path):
@@ -253,8 +258,7 @@ def rename_library(locator, name):
     if not isinstance(loc.get("name"), str) or not loc["name"].strip():
         raise ValueError("缺少库定位")
     safe = _sanitize_filename(loc["name"])
-    reserved = {item.casefold() for item in _RESERVED_LIBRARY_NAMES}
-    if safe.casefold() in reserved or _sanitize_filename(name).casefold() in reserved:
+    if _is_reserved_library_name(safe) or _is_reserved_library_name(name):
         raise ValueError("系统保留名不能用于提示词库")
     path = _user_path(safe)
     with _write_lock:
@@ -275,7 +279,7 @@ def rename_library(locator, name):
 def delete_library(name):
     """删除用户库（同时删除 backup）。"""
     safe = _sanitize_filename(name)
-    if safe in _RESERVED_LIBRARY_NAMES:
+    if _is_reserved_library_name(safe):
         raise ValueError(f"库名 {safe} 是系统保留名，无法删除")
     path = _user_path(name)
     with _write_lock:

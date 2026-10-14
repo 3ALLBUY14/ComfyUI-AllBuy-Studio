@@ -34,6 +34,24 @@ def _comfy_nodes():
     return nodes
 
 
+def _loader_class(name):
+    nodes = _comfy_nodes()
+    loader = getattr(nodes, name, None) or getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(name)
+    if loader is None:
+        raise RuntimeError(f"AllBuy-LoRA 堆栈：未找到 ComfyUI {name} 加载器，请升级 ComfyUI")
+    return loader
+
+
+def _loader_options(loader_name, field, fallback):
+    try:
+        definition = _loader_class(loader_name).INPUT_TYPES()["required"][field][0]
+        if isinstance(definition, (list, tuple)) and definition:
+            return list(definition)
+    except Exception:
+        pass
+    return fallback
+
+
 def _parse_entries(stack_json):
     """解析 stack_json → 条目列表。非法 JSON / 非列表抛 ValueError（含中文说明）。"""
     try:
@@ -189,6 +207,20 @@ class AllBuyLoRAStack:
             loras = ["None"] + fp.get_filename_list("loras")
         except Exception:
             loras = ["None"]
+        try:
+            encoders = fp.get_filename_list("text_encoders")
+        except Exception:
+            try:
+                encoders = fp.get_filename_list("clip")
+            except Exception:
+                encoders = []
+        try:
+            vaes = fp.get_filename_list("vae")
+        except Exception:
+            vaes = []
+        clips = _loader_options("CLIPLoader", "clip_name", encoders)
+        clip_types = _loader_options("CLIPLoader", "type", ["stable_diffusion"])
+        vaes = _loader_options("VAELoader", "vae_name", vaes)
         return {
             "required": {
                 "模型类型": (_MODEL_TYPES, {"default": "UNET"}),
@@ -204,6 +236,10 @@ class AllBuyLoRAStack:
                 "gguf_dequant_dtype": (_GGUF_DTYPES, {"default": "default"}),
                 "gguf_patch_dtype": (_GGUF_DTYPES, {"default": "default"}),
                 "gguf_patch_on_device": ("BOOLEAN", {"default": False}),
+                # Append new optional widgets to preserve the positional values of older workflows.
+                "clip_name": (["None"] + [name for name in clips if name != "None"], {"default": "None"}),
+                "clip_type": (clip_types, {"default": clip_types[0]}),
+                "vae_name": (["None"] + [name for name in vaes if name != "None"], {"default": "None"}),
             },
         }
 
@@ -227,6 +263,9 @@ class AllBuyLoRAStack:
             "gguf_dequant_dtype": kwargs.get("gguf_dequant_dtype", "default"),
             "gguf_patch_dtype": kwargs.get("gguf_patch_dtype", "default"),
             "gguf_patch_on_device": bool(kwargs.get("gguf_patch_on_device", False)),
+            "clip_name": kwargs.get("clip_name", "None"),
+            "clip_type": kwargs.get("clip_type", "stable_diffusion"),
+            "vae_name": kwargs.get("vae_name", "None"),
         }
         h.update(json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         h.update(json.dumps(_effective_entry_signature(entries),
@@ -298,6 +337,13 @@ class AllBuyLoRAStack:
         entries = _validated_entries(stack_json)
         model, clip, vae = self._load_base_model(
             模型类型, ckpt_name, unet_name, gguf_name, **kwargs)
+        clip_name = kwargs.get("clip_name", "None")
+        if clip_name and clip_name != "None":
+            clip = _loader_class("CLIPLoader")().load_clip(
+                clip_name, kwargs.get("clip_type", "stable_diffusion"))[0]
+        vae_name = kwargs.get("vae_name", "None")
+        if vae_name and vae_name != "None":
+            vae = _loader_class("VAELoader")().load_vae(vae_name)[0]
         model = self._apply_loras(model, entries)
         return (model, clip, vae, _trigger_words(entries))
 

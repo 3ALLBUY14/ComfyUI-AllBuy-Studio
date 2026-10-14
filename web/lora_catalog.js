@@ -66,6 +66,7 @@ async function request(action) {
   data = result;
   loaded = true;
   for (const listener of listeners) listener(action);
+  if (action) window.dispatchEvent(new CustomEvent("allbuy-lora-data-changed", { detail: { origin: "node" } }));
   return data;
 }
 function load() {
