@@ -15,6 +15,13 @@ import unittest
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
+# CI/离线环境补缺失模块桩（numpy/PIL 等，本机有真实库时不干预）；
+# 下方两个与后端注册表交叉校验的测试会导入全部节点模块
+try:
+    from tests import _offline_stubs  # noqa: F401
+except ImportError:
+    import _offline_stubs  # noqa: F401
+
 
 class WebJsSyntaxTests(unittest.TestCase):
     def test_image_compare_hover_and_drag(self):

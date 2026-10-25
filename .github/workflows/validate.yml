@@ -30,6 +30,10 @@ jobs:
       - name: 编译检查全部 Python 文件
         run: python -m compileall -q -x '__pycache__' .
 
+      - name: 安装测试用轻量依赖
+        # 库测试会真实调用 aiohttp.web；numpy/torch/PIL 由 tests/_offline_stubs.py 桩顶
+        run: pip install aiohttp
+
       - name: 纯 stdlib 单元测试
         run: python -m unittest -v
           tests.test_examples

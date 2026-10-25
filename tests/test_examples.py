@@ -20,6 +20,13 @@ _pkg = types.ModuleType("vpl")
 _pkg.__path__ = [PKG_DIR]
 sys.modules.setdefault("vpl", _pkg)
 
+# CI/离线环境补缺失模块桩（本机有真实库时不干预）；必须在导入 vpl.* 之前
+try:
+    from tests import _offline_stubs  # noqa: F401  (unittest 包路径)
+except ImportError:
+    import _offline_stubs  # noqa: F401  (pytest 顶层模块路径)
+
+
 EXAMPLES_DIR = os.path.join(PKG_DIR, "examples")
 # 与 __init__.py 的节点模块清单保持一致，新节点模块加进 examples 前先登记
 KNOWN_TYPES = set()

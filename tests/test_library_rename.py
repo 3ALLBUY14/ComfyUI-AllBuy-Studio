@@ -13,6 +13,13 @@ from unittest.mock import patch
 pkg = types.ModuleType("vpl")
 pkg.__path__ = [str(Path(__file__).resolve().parents[1])]
 sys.modules.setdefault("vpl", pkg)
+
+# CI/离线环境补缺失模块桩（本机有真实库时不干预）；必须在导入 vpl.* 之前
+try:
+    from tests import _offline_stubs  # noqa: F401  (unittest 包路径)
+except ImportError:
+    import _offline_stubs  # noqa: F401  (pytest 顶层模块路径)
+
 store = importlib.import_module("vpl.library_store")
 api = importlib.import_module("vpl.api")
 
