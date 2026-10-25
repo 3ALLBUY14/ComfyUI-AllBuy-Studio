@@ -1,25 +1,31 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { openEditor, uid } from "./editor_dialog.js";
-import { modelKey, categoriesOf, locatorKey, shortName, filterManagerItems, validatePresetEntries, managerAppearance } from "./manager_data.js";
+import { modelKey, categoriesOf, locatorKey, shortName, filterManagerItems, validatePresetEntries, managerAppearance, managerVisualPreferences } from "./manager_data.js";
 import { mediaThumbnail, openMediaLightbox, promptMedia, attachMediaDrop, previewFileKind } from "./manager_media.js";
 import { createManagerSelect, showManagerContext, hasManagerPopup, closeManagerPopup } from "./manager_controls.js";
 import { ManagerStackEditor } from "./manager_stack.js";
+import { ManagerWorkflows } from "./manager_workflows.js";
 
 const API = "/allbuy_promptlibrary";
 const STORAGE = "allbuy-manager.v1";
 const PAGE_SIZE = 80;
-const TABS = { prompts: "提示词组", loras: "LoRA 模型", stacks: "LoRA 堆栈", presets: "LoRA 组合" };
+const TABS = { prompts: "提示词组", loras: "LoRA 模型", stacks: "LoRA 堆栈", presets: "LoRA 组合", workflows: "工作流管理" };
 const icons = {
   library: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
   prompts: '<path d="M7 4h10M12 4v16M8 20h8"/>',
   loras: '<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
   presets: '<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="18" r="2"/>',
   stacks: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><rect x="3" y="15" width="18" height="5" rx="1.5"/><path d="M7 9v6m10-6v6"/>',
+  workflows: '<rect x="3" y="4" width="6" height="6" rx="1"/><rect x="15" y="14" width="6" height="6" rx="1"/><path d="M9 7h8v7M6 10v7h9"/>',
   bookmark: '<path d="M6 4h12v17l-6-4-6 4V4Z"/>',
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
   close: '<path d="m6 6 12 12M6 18 18 6"/>',
   arrow: '<path d="M4 12h16m-6-6 6 6-6 6"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
+  moon: '<path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>',
+  glass: '<rect x="3" y="3" width="13" height="13" rx="2"/><path d="M8 16v3a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-3M6 10l4-4"/>',
+  native: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/>',
 };
 function el(tag, className = "", text = "") {
   const node = document.createElement(tag);
@@ -103,6 +109,7 @@ class Manager {
     this.catalog = { tags: [], models: {} };
     this.previews = {};
     this.appearance = managerAppearance(prefs);
+    this.visual = managerVisualPreferences(prefs);
     this.presets = [];
     this.ready = { stacks: true };
     this.errors = {};
@@ -124,8 +131,10 @@ class Manager {
     this.applyAppearance();
     this.build();
     this.stackEditor = new ManagerStackEditor(this, { app, el, button, input, field, select });
+    this.workflows = new ManagerWorkflows(this, { app, api, el, button, input, field, select, readPreferences, savePreferences });
     this.onKey = event => {
       if (hasManagerPopup() || this.childModal || this.mediaClose || document.querySelector("body > .vpl-overlay")) return;
+      if (event.key === "Escape" && event.target.matches?.(".abm-folder-search") && event.target.value) return;
       if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); this.close(); }
       if (event.key === "Tab") {
         const focusable = [...this.root.querySelectorAll("button,input,select,textarea,a[href],[tabindex='0']")]
@@ -154,7 +163,8 @@ class Manager {
     const header = el("header", "abm-header");
     const brand = el("div", "abm-brand");
     const brandText = el("div");
-    const title = el("h1", "", "AllBuy · 资源管理");
+    const title = el("h1", "", "AllBuy Studio");
+    title.title = "AllBuy 创作套件 · 资源管理";
     title.id = "abm-title";
     brandText.append(title);
     brand.append(icon("library"), brandText);
@@ -171,6 +181,10 @@ class Manager {
     close.append(icon("close"));
     close.setAttribute("aria-label", "收起管理面板");
     close.title = "收起面板 · Esc";
+    const settings = el("div", "abm-header-settings");
+    this.themeButton = button("", () => this.setVisual({ theme: this.visual.theme === "light" ? "dark" : "light" }), "abm-setting-button");
+    this.launcherStyleButton = button("", () => this.setVisual({ launcherStyle: this.visual.launcherStyle === "glass" ? "native" : "glass" }), "abm-setting-button");
+    settings.append(this.themeButton, this.launcherStyleButton); this.applyAppearance();
     const appearance = el("div", "abm-appearance");
     for (const [key, label, min, max, step, suffix] of [["scale", "界面", 80, 140, 5, "%"], ["fontSize", "字体", 11, 20, 1, "px"]]) {
       const control = input(label + "大小", this.appearance[key], "range");
@@ -194,7 +208,7 @@ class Manager {
         control.value = value; control.nextElementSibling.textContent = value + (index === 0 ? "%" : "px");
       });
     }));
-    header.append(brand, tabs, close);
+    header.append(brand, tabs, settings, close);
     const workspace = el("div", "abm-workspace");
     this.sidebar = el("aside", "abm-sidebar");
     this.sidebar.setAttribute("aria-label", "资源分类");
@@ -228,7 +242,7 @@ class Manager {
     this.list.setAttribute("aria-label", "资源列表");
     this.list.tabIndex = 0;
     this.list.addEventListener("contextmenu", event => {
-      if (event.target.closest(".abm-card") || this.tab === "stacks") return;
+      if (event.target.closest(".abm-card") || ["stacks", "workflows"].includes(this.tab)) return;
       event.preventDefault(); event.stopPropagation();
       if (this.busy || this.loading) return;
       const chooseView = value => this.setView(value);
@@ -257,8 +271,22 @@ class Manager {
   }
 
   applyAppearance() {
+    this.root.dataset.theme = this.visual.theme;
     this.root.style.setProperty("--abm-ui-scale", this.appearance.scale / 100);
     this.root.style.setProperty("--abm-font-size", this.appearance.fontSize + "px");
+    if (this.themeButton) {
+      this.themeButton.replaceChildren(icon(this.visual.theme === "light" ? "sun" : "moon"), el("span", "abm-setting-label", this.visual.theme === "light" ? "亮色" : "深色"));
+      this.themeButton.title = this.visual.theme === "light" ? "切换为深色主题" : "切换为亮色主题";
+      this.themeButton.setAttribute("aria-label", this.themeButton.title); this.themeButton.setAttribute("aria-pressed", String(this.visual.theme === "light"));
+      const glass = this.visual.launcherStyle === "glass";
+      this.launcherStyleButton.replaceChildren(icon(glass ? "glass" : "native"), el("span", "abm-setting-label", glass ? "玻璃浮窗" : "原色浮窗"));
+      this.launcherStyleButton.title = glass ? "资源管理按钮：玻璃质感，点击切换为 ComfyUI 原色" : "资源管理按钮：ComfyUI 原色，点击切换为玻璃质感";
+      this.launcherStyleButton.setAttribute("aria-label", this.launcherStyleButton.title); this.launcherStyleButton.setAttribute("aria-pressed", String(!glass));
+    }
+  }
+  setVisual(patch) {
+    closeManagerPopup(); this.visual = managerVisualPreferences({ ...this.visual, ...patch }); savePreferences(this.visual);
+    this.applyAppearance(); applyLauncherAppearance(this.visual);
   }
   stopMedia(host) { host.querySelectorAll("video").forEach(video => video.pause()); }
   setView(mode) {
@@ -319,7 +347,7 @@ class Manager {
     this.status.textContent = text;
     this.status.classList.toggle("abm-error", error);
   }
-  items() { return this.tab === "stacks" ? [] : this.tab === "prompts" ? this.library?.groups || [] : this.tab === "loras" ? this.models.map(name => ({ id: name, name })) : this.presets; }
+  items() { return this.tab === "workflows" ? this.workflows.items : this.tab === "stacks" ? [] : this.tab === "prompts" ? this.library?.groups || [] : this.tab === "loras" ? this.models.map(name => ({ id: name, name })) : this.presets; }
   filtered() { return filterManagerItems(this.items(), { tab: this.tab, query: this.search.value, filter: this.filter, sort: this.sort, catalog: this.catalog, groups: this.groups }); }
   selected() { return this.items().filter(item => this.selection.has(item.id)); }
   editable() { return this.tab === "prompts" && this.locator?.source === "user" && this.library && this.ready.prompts; }
@@ -334,14 +362,18 @@ class Manager {
   }
   switchTab(tab) {
     if (this.busy || this.loading || tab === this.tab) return;
+    if (this.tab === "workflows") this.workflows.rememberPosition();
     this.tab = tab;
     this.selection.clear(); this.focused = null; this.filter = ""; this.search.value = ""; this.limit = PAGE_SIZE;
     savePreferences({ tab });
+    if (tab === "workflows") this.workflows.restorePosition();
+    if (tab !== "workflows" && (!this.ready[tab] || tab === "stacks" && !this.modelInfo) && !this.errors[tab]) { this.refresh(); return; }
     this.render();
     this.report(this.errors[tab] || "勾选资源后，可添加到工作流", !!this.errors[tab]);
   }
 
   async refresh() {
+    if (this.tab === "workflows") return this.workflows.refresh();
     if (this.busy || this.loading) return;
     this.loading = true;
     const epoch = ++this.epoch;
@@ -410,9 +442,10 @@ class Manager {
     closeManagerPopup();
     this.root.dataset.tab = this.tab;
     this.sortSelect.hidden = this.tab === "stacks";
-    this.search.placeholder = this.tab === "stacks" ? "筛选堆栈模型 / 激活提示词…" : "搜索名称、标签和内容";
+    this.search.placeholder = this.tab === "stacks" ? "筛选堆栈模型 / 激活提示词…" : this.tab === "workflows" ? "搜索工作流、模型、节点、标签和备注…" : "搜索名称、标签和内容";
     for (const [tab, node] of Object.entries(this.tabButtons)) { node.classList.toggle("is-active", tab === this.tab); node.disabled = this.busy || this.loading; node.setAttribute("aria-pressed", String(tab === this.tab)); }
     this.heading.textContent = TABS[this.tab];
+    if (this.tab === "workflows") { this.workflows.render(); return; }
     this.renderSidebar(); this.renderActions(); this.renderItems();
   }
   navItem(label, filter, count) {
@@ -569,7 +602,7 @@ class Manager {
     this.report("已保存到用户库");
   }
   async editPrompt(item) {
-    const result = await openEditor(item || null, { isNew: !item, categories: [...new Set((this.library?.groups || []).flatMap(categoriesOf))], palette: this.library?.meta || {} });
+    const result = await openEditor(item || null, { isNew: !item, categories: [...new Set((this.library?.groups || []).flatMap(categoriesOf))], palette: this.library?.meta || {}, theme: this.visual.theme });
     this.root.focus();
     if (!result || !this.root.isConnected) return;
     await this.savePromptChange(library => {
@@ -904,6 +937,7 @@ class Manager {
     return this.drafts.get(name);
   }
   renderItems() {
+    if (this.tab === "workflows") { this.workflows.renderList(); return; }
     if (this.tab === "stacks") { this.stackEditor.render(); return; }
     this.masonryObserver?.disconnect();
     const filtered = this.filtered();
@@ -1154,6 +1188,7 @@ class Manager {
     closeManagerPopup();
     cancelAnimationFrame(this.appearanceFrame); savePreferences(this.appearance);
     this.stackEditor.destroy();
+    this.workflows.destroy();
     this.masonryObserver?.disconnect(); cancelAnimationFrame(this.masonryFrame);
     this.mediaClose?.();
     this.stopMedia(this.root);
@@ -1174,19 +1209,28 @@ function openManager() {
   manager = new Manager();
   launcher?.setAttribute("aria-expanded", "true");
 }
+function applyLauncherAppearance(visual = managerVisualPreferences(readPreferences())) {
+  if (!launcher) return;
+  launcher.dataset.theme = visual.theme; launcher.dataset.material = visual.launcherStyle;
+}
+function setLauncherStyle(style) {
+  const visual = managerVisualPreferences({ ...readPreferences(), launcherStyle: style }); savePreferences(visual); applyLauncherAppearance(visual);
+  if (manager) { manager.visual = visual; manager.applyAppearance(); }
+}
 function installLauncher() {
   if (document.getElementById("allbuy-manager-launcher")) return;
   const style = el("link");
   style.rel = "stylesheet";
-  style.href = new URL("./manager.css?v=3.146", import.meta.url).href;
+  style.href = new URL("./manager.css?v=3.156", import.meta.url).href;
   document.head.appendChild(style);
   launcher = button("", openManager, "abm-launcher");
+  applyLauncherAppearance();
   launcher.id = "allbuy-manager-launcher";
   launcher.append(icon("library"), el("span", "", "资源管理"));
-  launcher.setAttribute("aria-label", "打开 AllBuy 提示词与 LoRA 管理面板");
+  launcher.setAttribute("aria-label", "打开 AllBuy Studio 创作套件资源管理面板");
   launcher.setAttribute("aria-haspopup", "dialog");
   launcher.setAttribute("aria-expanded", "false");
-  launcher.title = "点击打开 · 拖动调整位置";
+  launcher.title = "AllBuy Studio｜AllBuy 创作套件 · 点击打开 · 拖动调整位置 · 右键切换质感";
   document.body.appendChild(launcher);
   let position = readPreferences().position;
   const place = () => {
@@ -1226,6 +1270,10 @@ function installLauncher() {
     event.preventDefault(); event.stopPropagation();
     showManagerContext(launcher, [
       { label: "打开资源管理", action: openManager },
+      { separator: true },
+      { label: (launcher.dataset.material === "glass" ? "✓ " : "") + "玻璃质感", action: () => setLauncherStyle("glass") },
+      { label: (launcher.dataset.material === "native" ? "✓ " : "") + "ComfyUI 原色（不透明）", action: () => setLauncherStyle("native") },
+      { separator: true },
       { label: "恢复浮窗位置", action: () => { position = null; launcher.style.left = launcher.style.top = ""; launcher.style.right = launcher.style.bottom = ""; savePreferences({ position: null }); } },
     ], event.clientX, event.clientY);
   });

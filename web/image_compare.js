@@ -350,6 +350,14 @@ class ABCompareWidget {
     return true;
   }
 
+  syncDragState(event) {
+    // 在节点外松键可能收不到 up；移动时以实际左键状态清理残留拖拽。
+    if (typeof event?.buttons === "number" && !(event.buttons & 1)) {
+      this.node._abDragging = false;
+      this.dragging = false;
+    }
+  }
+
   mouse(event, pos) {
     // 坐标系归一化：LiteGraph 条带内分发时 pos 以 widget 顶为原点（y 已减布局 y），
     // 节点级 onMouseDown 转发时 pos 以节点顶为原点——两套差一个布局偏移。
@@ -404,6 +412,7 @@ class ABCompareWidget {
       return true;
     }
     if (type.includes("move")) {
+      this.syncDragState(event);
       if (!hasImages(this.node)) return Boolean(this.dragging);
       // 悬停模式开启或拖拽中时跟随（move 事件仅在部分分发路径到达 widget；
       // 纯悬停的跟随由节点级 onMouseMove 钩子负责）
@@ -774,6 +783,7 @@ app.registerExtension({
       // 事件仅在拖拽激活期可靠到达，纯悬停必须走节点级 onMouseMove
       try {
         const w = this._abWidget;
+        w?.syncDragState(e);
         if (this._abDragging && w) {
           // 节点钩子发起的拖拽：move 事件不经 widget 分发，这里驱动
           w.setSplitFromPos(pos);

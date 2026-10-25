@@ -1,4 +1,4 @@
-// ComfyUI-AllBuy_PromptLibrary 主前端逻辑
+// AllBuy Studio 主前端逻辑
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { openEditor, uid } from "./editor_dialog.js";
@@ -8,7 +8,7 @@ import { installListReorder, reorderIds } from "./list_reorder.js";
 import { installLibraryPicker } from "./library_picker.js";
 import { promptApplication } from "./manager_data.js";
 
-const PLUGIN_VERSION = "v3.146"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
+const PLUGIN_VERSION = "v3.156"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
 
 // ---------------------------------------------------------------------------
 // 注入样式表（ComfyUI 不会自动加载 WEB_DIRECTORY 下的 CSS，必须手动注入 link）
@@ -27,14 +27,10 @@ const PLUGIN_VERSION = "v3.146"; // 改样式/逻辑时递增，用于强制浏�
   link.id = "vpl-style-link";
   link.rel = "stylesheet";
   link.type = "text/css";
-  try {
-    link.href = new URL("./style.css?v=" + PLUGIN_VERSION, import.meta.url).href;
-  } catch (e) {
-    link.href = "/extensions/ComfyUI-AllBuy_PromptLibrary/style.css?v=" + PLUGIN_VERSION;
-  }
+  link.href = new URL("./style.css?v=" + PLUGIN_VERSION, import.meta.url).href;
   document.head.appendChild(link);
 
-  console.log("%c[AllBuy_PromptLibrary] " + PLUGIN_VERSION + " 前端已加载",
+  console.log("%c[AllBuy Studio] " + PLUGIN_VERSION + " 前端已加载",
     "color:#6366f1;font-weight:bold");
 })();
 
@@ -1500,7 +1496,7 @@ function startController(node) {
       let msg;
       if (!groups.length && (!state.libraries || !state.libraries.length)) {
         msg = "⚠ 无法从后端加载库。请确认已重启 ComfyUI 服务（不是只刷新网页），"
-            + "并查看终端是否有 [AllBuy_PromptLibrary] 已加载 日志。";
+            + "并查看终端是否有 [AllBuy Studio] 已加载 日志。";
       } else if (groups.length) {
         msg = "没有匹配的提示词组";
       } else {
@@ -2426,7 +2422,7 @@ function startController(node) {
       // 多次延迟重算高度，应对 DOM widget 定位/字体加载后的尺寸变化
       [60, 250, 600].forEach((t) => setTimeout(recalcHeight, t));
     } catch (e) {
-      console.error("[AllBuy_PromptLibrary] 初始化失败：", e);
+      console.error("[AllBuy Studio] 初始化失败：", e);
       els.list.innerHTML = "";
       els.list.appendChild(h("div", { class: "vpl-empty" },
         "初始化失败：" + ((e && e.message) || e) + "。请刷新节点或查看浏览器控制台。"));
@@ -2445,7 +2441,7 @@ function startController(node) {
         renderAll();
         [60, 250].forEach((t) => setTimeout(() => { recalcHeight(); pruneStrayWidgets(); }, t));
       } catch (e) {
-        console.error("[AllBuy_PromptLibrary] 刷新失败：", e);
+        console.error("[AllBuy Studio] 刷新失败：", e);
       }
     });
   }
@@ -3481,7 +3477,7 @@ function startRandomController(node) {
 // ComfyUI 扩展注册
 // ---------------------------------------------------------------------------
 app.registerExtension({
-  name: "ComfyUI-AllBuy_PromptLibrary",
+  name: "ComfyUI-AllBuy-Studio",
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name === NODE_NAME || nodeData.name === NODE_NAME_LEGACY) {
       installGraphToPromptHook();

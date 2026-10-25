@@ -9,6 +9,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 from collections import OrderedDict
 
 from aiohttp import web
@@ -62,7 +63,7 @@ try:
     _routes = PromptServer.instance.routes
 except Exception as _e:  # noqa: BLE001
     _routes = None
-    print(f"[AllBuy_PromptLibrary] 警告：无法获取 PromptServer，API 路由未注册：{_e}")
+    print(f"[AllBuy Studio] 警告：无法获取 PromptServer，API 路由未注册：{_e}")
 
 
 def _get(path):
@@ -469,7 +470,7 @@ async def _image_response(path, w):
             )
         except Exception as e:  # noqa: BLE001
             # 缩略图生成失败（损坏/异常格式）回退原图
-            print(f"[AllBuy_PromptLibrary] 缩略图生成失败，回退原图：{path} - {e}")
+            print(f"[AllBuy Studio] 缩略图生成失败，回退原图：{path} - {e}")
     ext = os.path.splitext(path)[1].lower()
     mime = _IMAGE_MIME.get(ext, "application/octet-stream")
     try:
@@ -576,6 +577,47 @@ async def cover_upload(request):
 @_post("/media/upload")
 async def media_upload(request):
     return await _receive_asset(request)
+
+
+_CUTOUT_LOCK = threading.Lock()
+_CUTOUT_SESSION = None
+
+
+def _cutout_asset(name):
+    """Optional rembg; publish into the same durable asset store as all uploads."""
+    global _CUTOUT_SESSION
+    path = asset_store.resolve(name)
+    if not path:
+        raise ValueError("图片素材不存在")
+    try:
+        import rembg
+    except ImportError as exc:
+        raise RuntimeError("自动抠图需要在 ComfyUI 的 Python 环境安装 rembg；其他合成功能不受影响") from exc
+    from .image_tools import load_asset
+    image = load_asset(name)
+    with _CUTOUT_LOCK:
+        if _CUTOUT_SESSION is None:
+            _CUTOUT_SESSION = rembg.new_session("u2net")
+        result = rembg.remove(image, session=_CUTOUT_SESSION)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir=asset_store.root()) as tmp:
+        tmp_path = tmp.name
+    try:
+        result.save(tmp_path, format="PNG")
+        return asset_store.import_file(tmp_path, "cutout.png")
+    finally:
+        os.unlink(tmp_path)
+
+
+@_post("/image-tools/remove-background")
+async def image_tools_remove_background(request):
+    try:
+        data = await request.json()
+        saved = await asyncio.to_thread(_cutout_asset, str(data.get("name", "")))
+        return web.json_response({"ok": True, **saved})
+    except RuntimeError as exc:
+        return _json_error(exc, 503)
+    except Exception as exc:
+        return _json_error(exc)
 
 
 @_get("/cover/file")

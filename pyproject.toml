@@ -1,0 +1,31 @@
+# ComfyUI-Manager / Registry 搜索匹配本段文字，因此逐一列出节点名，
+# 而不是抽象地描述这个合集。
+description = "ComfyUI-AllBuy-Studio（AllBuy Studio 创作套件）：中文界面的一站式创作节点与全屏资源管理。节点：AllBuy-提示词库（prompt library，勾选卡片按顺序合并为正/负提示词，支持导入导出）、AllBuy-随机抽卡（random prompt draw，seed 可复现）、AllBuy-批量选图（batch image selector，图片与提示词组双向映射）、AllBuy-素材加载（图/音/视频素材库：图片裁剪与遮罩编辑、视频选区抽帧、音频波形裁剪）、AllBuy-LoRA 堆栈（LoRA stack，一个节点完成 Checkpoint/UNET/GGUF 底模 + 多 LoRA）、AllBuy-A/B 图像对比（image compare A/B）、AllBuy-文本框（大段提示词编辑、替换表）、AllBuy-图层合成器（自由画布、图层变换与抠图）、AllBuy-多图拼接（横向/纵向/网格）、AllBuy-图片标题、AllBuy-生成（原生采样、图生图、遮罩重绘、扩图）。附带全屏资源管理面板：提示词组、LoRA 模型 / 堆栈 / 组合管理、工作流管理（标签、收藏、封面预览、回收站）。示例工作流见 examples/。"
+version = "3.156"  # 与 constants.py 的 PLUGIN_VERSION 保持一致（去掉 v 前缀）
+# comfy-cli 会把 license 原样序列化为 JSON，`text` 形式在 Registry 列表中
+# 显示为可读名称；LICENSE 文件本身不受影响。
+license = { text = "MIT License" }
+
+keywords = [
+    "comfyui", "comfyui-custom-nodes", "allbuy", "allbuy studio",
+    "prompt library", "prompt manager", "提示词库", "随机抽卡",
+    "batch image", "image compare", "image stitch", "media loader",
+    "lora", "lora stack", "lora manager", "workflow manager", "工作流管理",
+    "image composer", "inpaint", "outpaint", "中文界面",
+]
+
+classifiers = ["Operating System :: OS Independent"]
+
+# 复用 ComfyUI 自带的 Pillow、NumPy 与 aiohttp，无额外依赖
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/3ALLBUY14/ComfyUI-AllBuy-Studio"
+Issues = "https://github.com/3ALLBUY14/ComfyUI-AllBuy-Studio/issues"
+
+[tool.comfy]
+PublisherId = "3ALLBUY14"
+DisplayName = "AllBuy Studio"
+Icon = "https://github.com/3ALLBUY14.png"
+# 最低 ComfyUI 版本门槛暂不设置：未做过系统化的旧版本兼容测试，
+# 先不写入未经证实的版本号，待实际验证后补充 requires-comfyui。

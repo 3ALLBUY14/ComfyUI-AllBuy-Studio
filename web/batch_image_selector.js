@@ -17,11 +17,7 @@ const MIN_THUMB = 88; // 缩略图最小尺寸下限（渲染/上传/持久化�
   link.id = "bips-style-link";
   link.rel = "stylesheet";
   link.type = "text/css";
-  try {
-    link.href = new URL("./style.css?v=" + PLUGIN_VERSION, import.meta.url).href;
-  } catch (e) {
-    link.href = "/extensions/ComfyUI-AllBuy_PromptLibrary/style.css?v=" + PLUGIN_VERSION;
-  }
+  link.href = new URL("./style.css?v=" + PLUGIN_VERSION, import.meta.url).href;
   document.head.appendChild(link);
 })();
 

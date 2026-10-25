@@ -40,25 +40,37 @@ class PromptLibrary:
         return {
             "required": {
                 # 以下三个 widget 由前端自定义 UI 接管并隐藏原生输入框
-                "库": ("STRING", {"default": DEFAULT_LOCATOR}),
+                "库": ("STRING", {"default": DEFAULT_LOCATOR,
+                                  "tooltip": "使用哪个提示词库；面板顶部可切换，user: 用户库 / builtin: 内置库"}),
                 "选中卡片": ("STRING", {"default": "[]"}),
-                "分隔符": ("STRING", {"default": constants.DEFAULT_SEPARATOR}),
+                "分隔符": ("STRING", {"default": constants.DEFAULT_SEPARATOR,
+                                    "tooltip": "多组卡片合并时的连接文本"}),
             },
             "optional": {
-                "前缀": ("STRING", {"default": ""}),
-                "后缀": ("STRING", {"default": ""}),
+                "前缀": ("STRING", {"default": "", "tooltip": "合并结果整体前置的固定文本，支持 {a|b} 通配符"}),
+                "后缀": ("STRING", {"default": "", "tooltip": "合并结果整体后置的固定文本，支持 {a|b} 通配符"}),
                 # v3.3：忽略权重开关——生视频的提示词通常不需要 (text:w) 包裹
                 "忽略权重": ("BOOLEAN", {"default": False,
                                        "tooltip": "生视频提示词不需要权重；勾选后合并输出不带 (text:w) 包裹"}),
                 # 当 library locator 的 source 为 "inline" 时，库数据内嵌于此（工作流自包含）
                 "库数据": ("STRING", {"default": ""}),
                 # v3.34：命名槽取值 {"性别":"女人"}——组文本里的 {名称:选项1|选项2} 由前端面板固定取值
-                "变量取值": ("STRING", {"default": "{}"}),
+                "变量取值": ("STRING", {"default": "{}",
+                                     "tooltip": "命名槽取值 {\"名称\":\"值\"}：卡片文本里的 {名称:选项1|选项2} 按指定值固定替换"}),
             },
         }
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("正提示词", "负提示词")
+    OUTPUT_TOOLTIPS = (
+        "勾选卡片按顺序合并后的正向提示词",
+        "勾选卡片按顺序合并后的负向提示词",
+    )
+    DESCRIPTION = (
+        "把提示词拆成组存为卡片，勾选即生效：多组按列表顺序合并为正/负提示词输出。"
+        "支持分类 / 标签 / 收藏筛选、{a|b} 通配与命名槽变量；库、卡片与合并顺序都在"
+        "面板里管理，也可在「资源管理」面板中编辑后再应用。"
+    )
     CATEGORY = "AllBuy/提示词库"
     FUNCTION = "execute"
     # v3.51：双击画布搜索节点时支持中文（前端 1.16+ 读取 search_aliases）
@@ -202,6 +214,14 @@ class PromptRandomDraw:
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("正提示词", "负提示词")
+    OUTPUT_TOOLTIPS = (
+        "本次抽中的卡片按顺序合并后的正向提示词",
+        "本次抽中的卡片按顺序合并后的负向提示词",
+    )
+    DESCRIPTION = (
+        "从所选库随机抽 N 张卡片合并输出，相同种子结果可复现，适合批量出图找组合灵感。"
+        "面板里选库、筛分类 / 标签、锁定必含卡，数量与种子可调；前缀 / 后缀支持 {a|b} 通配。"
+    )
     CATEGORY = "AllBuy/提示词库"
     FUNCTION = "execute"
     SEARCH_ALIASES = ["随机抽卡", "抽卡", "random draw"]

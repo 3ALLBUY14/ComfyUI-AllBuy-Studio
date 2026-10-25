@@ -16,6 +16,9 @@ assert.deepEqual(rules.managerAppearance(), { scale: 100, fontSize: 13 });
 assert.deepEqual(rules.managerAppearance({ scale: 120, fontSize: 16 }), { scale: 120, fontSize: 16 });
 assert.deepEqual(rules.managerAppearance({ scale: 900, fontSize: -2 }), { scale: 140, fontSize: 11 });
 assert.deepEqual(rules.managerAppearance({ scale: "broken", fontSize: null }), { scale: 100, fontSize: 13 });
+assert.deepEqual(rules.managerVisualPreferences(), { theme: "dark", launcherStyle: "glass" });
+assert.deepEqual(rules.managerVisualPreferences({ theme: "light", launcherStyle: "native" }), { theme: "light", launcherStyle: "native" });
+assert.deepEqual(rules.managerVisualPreferences({ theme: "broken", launcherStyle: null }), { theme: "dark", launcherStyle: "glass" });
 const library = { source: "user", name: "shared" };
 const prompts = [{ id: "a", name: "镜头 10", categories: ["电影"], tags: ["光影"], positive: "slow dolly", star: true },
   { id: "b", name: "镜头 2", category: "人像", negative: "blurry", tags: [] }];

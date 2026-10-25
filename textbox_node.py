@@ -69,14 +69,24 @@ class AllBuyTextBox:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "文本": ("STRING", {"multiline": True, "default": ""}),
-                "替换表": ("STRING", {"multiline": True, "default": ""}),
-                "去空行": ("BOOLEAN", {"default": True}),
+                "文本": ("STRING", {"multiline": True, "default": "",
+                                    "tooltip": "大段提示词正文；节点面板支持替换表、去空行、撤销重做"}),
+                "替换表": ("STRING", {"multiline": True, "default": "",
+                                    "tooltip": "每行一条「原词=新词」，输出前批量替换"}),
+                "去空行": ("BOOLEAN", {"default": True, "tooltip": "去掉文本中的空行再输出"}),
             },
         }
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("提示词", "提示词行")
+    OUTPUT_TOOLTIPS = (
+        "整段文本（替换 / 去空行后）作为一个值输出",
+        "按行拆分的列表，下游逐批拿到一行（如逐行送 CLIPTextEncode 批处理）",
+    )
+    DESCRIPTION = (
+        "大段提示词编辑器：替换表批量替换、去空行、撤销重做，可与提示词库互转入库。"
+        "「提示词行」把文本按行拆成列表逐行下发，适合逐行批处理。"
+    )
     # 「提示词行」按批下发：普通下游（如 CLIPTextEncode）逐批拿到一行，
     # 而非把整个列表当一个值误用（官方执行器把 list 原样作单批值传递）
     OUTPUT_IS_LIST = (False, True)

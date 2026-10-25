@@ -20,19 +20,20 @@ _pkg = types.ModuleType("vpl")
 _pkg.__path__ = [PKG_DIR]
 sys.modules.setdefault("vpl", _pkg)
 
-nodes_mod = importlib.import_module("vpl.nodes")
-bips_mod = importlib.import_module("vpl.batch_image_node")
-media_mod = importlib.import_module("vpl.media_asset")
-
 EXAMPLES_DIR = os.path.join(PKG_DIR, "examples")
-KNOWN_TYPES = (set(nodes_mod.NODE_CLASS_MAPPINGS) | set(bips_mod.NODE_CLASS_MAPPINGS)
-               | set(media_mod.NODE_CLASS_MAPPINGS))
+# 与 __init__.py 的节点模块清单保持一致，新节点模块加进 examples 前先登记
+KNOWN_TYPES = set()
+for _name in ("nodes", "batch_image_node", "media_asset", "lora_stack_node",
+              "image_compare_node", "textbox_node", "image_tools", "generate_node"):
+    KNOWN_TYPES |= set(importlib.import_module(f"vpl.{_name}").NODE_CLASS_MAPPINGS)
 # 本测试不加载 ComfyUI 核心环境，示例里用到的节点单独放行：
 # - CORE_TYPES：ComfyUI 核心
 # - DEMO_TYPES：示例模板引用的第三方演示节点（Easy-Use 文本预览 / VHS 视频信息 /
 #   核心 Save 系列）。白名单只放行这几个，出现别的未知类型仍会报错拦住
 CORE_TYPES = {"CLIPTextEncode", "PreviewImage", "Note", "CheckpointLoaderSimple",
-              "UNETLoader", "VAELoader", "CLIPLoader", "SaveAudio", "SaveVideo"}
+              "UNETLoader", "VAELoader", "CLIPLoader", "SaveAudio", "SaveVideo",
+              "LoadImage", "SaveImage", "KSamplerAdvanced", "VAEDecode",
+              "TextConcatenate", "EmptyLatentImage"}
 DEMO_TYPES = {"easy showAnything", "CreateVideo", "VHS_VideoInfoLoaded"}
 
 

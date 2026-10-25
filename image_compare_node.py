@@ -28,10 +28,11 @@ class AllBuyABCompare:
             "optional": {
                 "auto_output": (
                     "BOOLEAN",
-                    {"default": True, "label_on": "on", "label_off": "off"},
+                    {"default": True, "label_on": "on", "label_off": "off",
+                     "tooltip": "on：选中侧自动输出并送预览；off：冻结当前画面（当开关用）"},
                 ),
-                "image_a": ("IMAGE",),
-                "image_b": ("IMAGE",),
+                "image_a": ("IMAGE", {"tooltip": "分割线左侧画面（A）"}),
+                "image_b": ("IMAGE", {"tooltip": "分割线右侧画面（B）"}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -41,6 +42,14 @@ class AllBuyABCompare:
 
     RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("图片A", "图片B")
+    OUTPUT_TOOLTIPS = (
+        "当前选中侧为 A（分割线左）时的画面",
+        "当前选中侧为 B（分割线右）时的画面",
+    )
+    DESCRIPTION = (
+        "拖分割线对比两张图，批量输入可翻页；右键切换原生预览槽位。"
+        "选中侧（分割线左为 A、右为 B）直接输出，可当选择开关用。"
+    )
     FUNCTION = "preview"
     OUTPUT_NODE = True
     CATEGORY = "AllBuy/图像工具"

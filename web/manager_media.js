@@ -60,7 +60,7 @@ export function mediaThumbnail(record, onOpen, { compact = true, onDrop, muted =
   box.style.setProperty("--abm-media-ratio", dimensions.get(url) || 1);
   image.addEventListener("load", remember);
   image.addEventListener("error", () => { image.hidden = true; box.classList.add("abm-media-failed"); });
-  if (url) image.src = kind === "image" ? url + (url.includes("?") ? "&" : "?") + "w=480" : url;
+  if (url) image.src = kind === "image" && !/^(data:|blob:)/.test(url) ? url + (url.includes("?") ? "&" : "?") + "w=480" : url;
   else image.hidden = true;
   box.append(element("span", "abm-media-fallback", record.video ? "视频预览" : "图片无法读取"), image);
   box.title = "双击放大 · 拖入图片或视频替换";

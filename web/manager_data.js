@@ -10,6 +10,9 @@ export function managerAppearance(preferences = {}) {
     ? Math.max(min, Math.min(max, Number(value))) : fallback;
   return { scale: number(preferences.scale, 100, 80, 140), fontSize: number(preferences.fontSize, 13, 11, 20) };
 }
+export function managerVisualPreferences(preferences = {}) {
+  return { theme: preferences.theme === "light" ? "light" : "dark", launcherStyle: preferences.launcherStyle === "native" ? "native" : "glass" };
+}
 
 export function filterManagerItems(items, { tab, query = "", filter = "", sort = "name", catalog = {}, groups = [] }) {
   const needle = query.trim().toLocaleLowerCase();

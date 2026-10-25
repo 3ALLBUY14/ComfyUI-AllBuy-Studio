@@ -1,14 +1,15 @@
 """常量定义。"""
 import os
 
-EXTENSION_NAME = "ComfyUI-AllBuy_PromptLibrary"
+EXTENSION_NAME = "ComfyUI-AllBuy-Studio"
 EXTENSION_FOLDER = os.path.dirname(os.path.abspath(__file__))
 BUILTIN_LIBRARIES_FOLDER = os.path.join(EXTENSION_FOLDER, "libraries")
 
 # 插件版本（前端 videoprompt_library.js 的 PLUGIN_VERSION 必须与此一致；
 # 前端通过 /allbuy_promptlibrary/version 接口对比，不一致说明后端未重启到新版）
-PLUGIN_VERSION = "v3.146"
+PLUGIN_VERSION = "v3.156"
 
+# 保留旧接口前缀，兼容已有节点前端和第三方调用。
 API_PREFIX = "/allbuy_promptlibrary"
 
 DEFAULT_LIBRARY_NAME = "default"

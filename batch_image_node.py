@@ -142,6 +142,16 @@ class BatchImagePromptSelector:
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("图片", "正提示词", "负提示词", "映射JSON")
+    OUTPUT_TOOLTIPS = (
+        "面板勾选的图片按顺序排成的 batch",
+        "每张图片绑定的提示词组按图合并后的正向提示词（逐图对应）",
+        "每张图片绑定的提示词组按图合并后的负向提示词（逐图对应）",
+        "图片 ↔ 提示词组映射关系，可导出保存或再导入",
+    )
+    DESCRIPTION = (
+        "图片 ↔ 提示词组双向映射：在面板里给每张图绑定提示词组，一次输出整批图片"
+        "与逐图合并的正 / 负提示词；映射关系可导入导出 JSON。"
+    )
     CATEGORY = "AllBuy/提示词库"
     FUNCTION = "execute"
     SEARCH_ALIASES = ["批量选图", "图文映射", "图片提示词", "batch image"]

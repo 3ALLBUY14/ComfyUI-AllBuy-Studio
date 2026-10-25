@@ -1,0 +1,56 @@
+# 离线校验：全部 Python 编译 + 纯 stdlib 单元测试 + 前端 .mjs 测试。
+# 依赖 torch / numpy / PIL / aiohttp / ComfyUI 运行时的测试不在本清单，
+# 它们依赖 ComfyUI 自带环境，需在本机 ComfyUI Python 下运行。
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: 编译检查全部 Python 文件
+        run: python -m compileall -q -x '__pycache__' .
+
+      - name: 纯 stdlib 单元测试
+        run: python -m unittest -v
+          tests.test_examples
+          tests.test_image_compare
+          tests.test_library_listing
+          tests.test_library_rename
+          tests.test_lora_catalog
+          tests.test_lora_groups
+          tests.test_lora_presets
+          tests.test_lora_stack
+          tests.test_merger
+          tests.test_random_draw
+          tests.test_textbox
+          tests.test_v351
+          tests.test_web_js
+
+      - name: 前端 .mjs 测试
+        run: |
+          shopt -s nullglob
+          for f in tests/test_*.mjs; do
+            echo "::group::$f"
+            node "$f"
+            echo "::endgroup::"
+          done

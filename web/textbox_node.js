@@ -854,4 +854,4 @@ app.registerExtension({
   },
 });
 
-console.info("[AllBuy_PromptLibrary] 文本框前端已加载 v3.105");
+console.info("[AllBuy Studio] 文本框前端已加载 v3.105");

@@ -84,7 +84,7 @@ function h(tag, props = {}, children = []) {
   return el;
 }
 
-export function openEditor(group, { isNew = false, categories = [], palette = {} } = {}) {
+export function openEditor(group, { isNew = false, categories = [], palette = {}, theme } = {}) {
   return new Promise((resolve) => {
     const data = group
       ? JSON.parse(JSON.stringify(group))
@@ -119,6 +119,7 @@ export function openEditor(group, { isNew = false, categories = [], palette = {}
     const uidSuffix = uid();
 
     const overlay = h("div", { class: "vpl-overlay" });
+    if (theme === "light" || theme === "dark") overlay.dataset.managerTheme = theme;
     const dialog = h("div", { class: "vpl-dialog vpl-editor" });
 
     // ---- 标题栏 ----

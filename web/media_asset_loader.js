@@ -22,11 +22,7 @@ const MEDIA_DIR = "allbuy_media";
   link.id = "media-style-link";
   link.rel = "stylesheet";
   link.type = "text/css";
-  try {
-    link.href = new URL("./style.css?v=" + MEDIA_VERSION, import.meta.url).href;
-  } catch (e) {
-    link.href = "/extensions/ComfyUI-AllBuy_PromptLibrary/style.css?v=" + MEDIA_VERSION;
-  }
+  link.href = new URL("./style.css?v=" + MEDIA_VERSION, import.meta.url).href;
   document.head.appendChild(link);
 })();
 

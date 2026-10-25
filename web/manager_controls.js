@@ -9,21 +9,30 @@ function element(tag, className = "", text = "") {
   node.textContent = text;
   return node;
 }
-function mountPopup(anchor, popup, { x, y, focusBack = anchor } = {}) {
+export function mountPopup(anchor, popup, { x, y, focusBack = anchor, matchAnchor = true } = {}) {
   closeManagerPopup();
   const root = anchor.closest(".abm-overlay") || document.body;
+  const theme = anchor.closest(".abm-overlay, .abm-launcher")?.dataset.theme;
+  if (theme) popup.dataset.theme = theme;
   root.appendChild(popup);
   const rect = anchor.getBoundingClientRect();
   const bounds = root === document.body ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight } : root.getBoundingClientRect();
   const scale = rect.width / Math.max(1, anchor.offsetWidth);
   popup.style.fontSize = `${parseFloat(getComputedStyle(anchor).fontSize) * scale}px`;
-  popup.style.width = `${Math.min(bounds.width - 16, Math.max(230, rect.width))}px`;
+  if (matchAnchor) popup.style.width = `${Math.min(bounds.width - 16, Math.max(230, rect.width))}px`;
+  else {
+    popup.style.width = "max-content";
+    popup.style.minWidth = `${Math.min(bounds.width - 16, 180 * scale)}px`;
+    popup.style.maxWidth = `${Math.min(bounds.width - 16, 300 * scale)}px`;
+  }
   const left = Math.max(8, Math.min((x ?? rect.left) - bounds.left, bounds.width - popup.offsetWidth - 8));
-  const desiredTop = (y ?? rect.bottom + 5) - bounds.top;
-  const top = Math.max(8, desiredTop + popup.offsetHeight > bounds.height - 8 ? Math.min((y ?? rect.top) - bounds.top - popup.offsetHeight - 5, bounds.height - popup.offsetHeight - 8) : desiredTop);
+  const desiredTop = (y ?? rect.bottom + 5) - bounds.top, aboveBottom = (y ?? rect.top - 5) - bounds.top;
+  const below = Math.max(0, bounds.height - desiredTop - 8), above = Math.max(0, aboveBottom - 8);
+  const upwards = popup.offsetHeight > below && above > below;
+  popup.style.maxHeight = `${Math.min(parseFloat(getComputedStyle(popup).maxHeight) || 380, upwards ? above : below)}px`;
+  const top = Math.max(8, Math.min(upwards ? aboveBottom - popup.offsetHeight : desiredTop, bounds.height - popup.offsetHeight - 8));
   popup.style.left = left + "px";
   popup.style.top = top + "px";
-  popup.style.maxHeight = `${Math.max(80, bounds.height - top - 8)}px`;
   const close = (restore = false) => {
     document.removeEventListener("pointerdown", outside, true);
     document.removeEventListener("keydown", key, true);
@@ -128,12 +137,13 @@ export function showManagerContext(anchor, entries, x, y) {
   for (const entry of entries) {
     if (entry.separator) { popup.appendChild(element("div", "abm-menu-separator")); continue; }
     const item = element("button", "abm-context-item" + (entry.danger ? " abm-error" : ""), entry.label);
+    if (entry.description) item.appendChild(element("span", "abm-context-description", entry.description));
     item.type = "button"; item.disabled = !!entry.disabled;
     item.setAttribute("role", "menuitem");
     item.addEventListener("click", () => { close(); entry.action(); });
     popup.appendChild(item);
   }
-  close = mountPopup(anchor, popup, { x, y });
+  close = mountPopup(anchor, popup, { x, y, matchAnchor: false });
   popup.addEventListener("keydown", event => {
     if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
     event.preventDefault();

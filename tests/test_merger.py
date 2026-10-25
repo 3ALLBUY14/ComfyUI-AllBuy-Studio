@@ -1,4 +1,4 @@
-"""ComfyUI-AllBuy_PromptLibrary 单元测试（不依赖 ComfyUI 环境）。
+"""AllBuy Studio 单元测试（不依赖 ComfyUI 环境）。
 
 运行：python tests/test_merger.py
 """

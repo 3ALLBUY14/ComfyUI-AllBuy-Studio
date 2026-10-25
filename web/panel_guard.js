@@ -123,6 +123,7 @@ export function installFillResize(node, opts) {
   const origDraw = node.onDrawBackground;
   let settleTimer = 0;
   let lastAppliedH = NaN;
+  let lastAppliedChrome = NaN;
 
   const apply = (n) => {
     const el = opts.el();
@@ -134,12 +135,14 @@ export function installFillResize(node, opts) {
       n.setSize([n.size?.[0] || opts.minWidth || n.size?.[0], floor]);
     }
     const h = n.size?.[1] || 0;
-    if (h > floor + 1) {
-      applyFillPanel(n, el, opts.chrome(), opts.margin ?? 18);
+    const chrome = opts.chrome();
+    if (opts.alwaysFill || h > floor + 1) {
+      applyFillPanel(n, el, chrome, opts.margin ?? 18);
     } else if (el.classList.contains("vpl-fill")) {
       clearFillPanel(el);
     }
     lastAppliedH = n.size?.[1] || 0;
+    lastAppliedChrome = chrome;
     if (opts.onSettled) {
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => { if (opts.el()?.isConnected) opts.onSettled(); }, 180);
@@ -154,7 +157,7 @@ export function installFillResize(node, opts) {
   node.onDrawBackground = function () {
     origDraw?.apply(this, arguments);
     const h = this.size?.[1] || 0;
-    if (h === lastAppliedH) return;
+    if (h === lastAppliedH && (!opts.trackChrome || opts.chrome() === lastAppliedChrome)) return;
     apply(this);
   };
   // 初值：让首个绘制帧先跑一次 apply（填充/清除到当前真实高度）
