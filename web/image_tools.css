@@ -32,6 +32,8 @@ textarea.ait-input { min-height: 88px; resize: vertical; }
 .ait-generate-actions { display: flex; }
 .ait-generate-actions-docked { position: absolute; height: 36px; }
 .ait-generate-actions > button { width: 100%; min-height: 36px; justify-content: center; }
+.ait-import-resize { flex-wrap: nowrap; }
+.ait-import-resize > .ait-field { min-width: 0; }
 .dom-widget:is(.ait-title-widget, .ait-grid-widget) { overflow: visible !important; }
 .ait-title-node { position: relative; overflow: visible; min-height: 650px; }
 .ait-grid-node { position: relative; overflow: visible; }

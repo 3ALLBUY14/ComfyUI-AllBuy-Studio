@@ -62,12 +62,29 @@ for (const mode of ["longest", "shortest"]) {
   const node = scaled["21"], encoderId = node.inputs.positive[0], encoder = scaled[encoderId];
   assert.notEqual(encoderId, "10");
   assert.deepEqual(node.inputs.negative, [encoderId, 1]);
-  assert.deepEqual(node.inputs.latent, [encoderId, 2], "Sampling canvas must match the resized Qwen reference");
+  assert.deepEqual(node.inputs.latent, ["old-latent-switch", 0], "Custom canvas must survive reference resizing");
   const resizeNode = scaled[encoder.inputs["images.image_1"][0]];
   assert.deepEqual(resizeNode, {class_type:"AllBuyImageResize",inputs:{image:["1",0],mode,size:1536}});
   assert.equal(encoder.inputs.resolution, 0);
   assert.deepEqual(encoder.inputs["images.image_2"], ["3", 0]);
   assert.deepEqual(scaled["10"], template["10"], "Other branches keep the original image and resolution");
+}
+for (const input of [undefined, ["10", 2]]) {
+  const automatic = structuredClone(template);
+  automatic["21"].inputs.input_resize = '{"mode":"longest","size":1536}';
+  if (input) automatic["21"].inputs.latent = input;
+  const result = applyGenerateReferences(automatic), node = result["21"];
+  assert.deepEqual(node.inputs.latent, [node.inputs.positive[0], 2], "Only Qwen's automatic canvas tracks the resized reference");
+}
+for (const selected of [false, true]) {
+  const switched = structuredClone(template);
+  switched["30"] = {class_type:"ComfySwitchNode",inputs:{switch:selected,on_false:["10",2],on_true:["40",0]}};
+  switched["40"] = {class_type:"EmptyLatentImage",inputs:{width:1536,height:864,batch_size:2}};
+  Object.assign(switched["21"].inputs,{source_image:["1",0],latent:["30",0],input_resize:'{"mode":"longest","size":1024}'});
+  const result = applyGenerateReferences(switched);
+  assert.deepEqual(result["21"].inputs.latent,["30",0]);
+  assert.deepEqual(result["30"],switched["30"]);
+  assert.deepEqual(result["40"].inputs,{width:1536,height:864,batch_size:2});
 }
 const connected = structuredClone(template);
 connected["21"].inputs.source_image = ["connected-image",0];

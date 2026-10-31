@@ -64,6 +64,34 @@ class AllBuyImageResize:
         return (resize_image(image, mode, size),)
 
 
+def resize_latent(latent, options, vae, qwen_reference=False):
+    ratio = options.get("ratio", "original")
+    if ratio == "original":
+        return latent
+    if ratio not in ("1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"):
+        raise ValueError("请选择有效的 Latent 比例")
+    target = float(options.get("size", 1024))
+    if not math.isfinite(target) or not target.is_integer() or not 1 <= target <= 8192:
+        raise ValueError("目标尺寸须为 1–8192 的整数")
+    mode = options.get("mode", "original")
+    if mode not in ("original", "longest", "shortest"):
+        raise ValueError("请选择有效的尺寸基准")
+    w, h = (int(value) for value in ratio.split(":"))
+    scale = target / (min(w, h) if mode == "shortest" else max(w, h))
+    compression = int(vae.spacial_compression_encode()) if hasattr(vae, "spacial_compression_encode") else 8
+    alignment = math.lcm(compression, 32) if qwen_reference else compression
+    w, h = (max(alignment, round(value * scale / alignment) * alignment) for value in (w, h))
+    if w * h > 16 * 1024 * 1024 or max(w, h) > 8192:
+        raise ValueError(f"Latent 画布为 {w} × {h}，超过上限；请减小目标尺寸或改用最长边")
+    downscale = int(latent.get("downscale_ratio_spacial", compression))
+    samples = latent["samples"]
+    if samples.ndim != 4 or downscale < 1:
+        raise ValueError("比例设置仅支持图像 Latent")
+    import torch.nn.functional as F
+    return {**latent, "samples": F.interpolate(samples, (max(1, h // downscale), max(1, w // downscale)),
+                                                mode="bilinear", align_corners=False)}
+
+
 def prepare_edit(source, mask, feather, stride=8, round_to_stride=False):
     import torch
     import torch.nn.functional as F
@@ -135,7 +163,7 @@ class AllBuyGenerate:
             "original_image": ("STRING", {"default": ""}),
             "input_resize": ("STRING", {"default": "{}"})},
             "optional": {"negative": ("CONDITIONING", {"tooltip": "负向提示词的 CLIPTextEncode 输出；不接则为空条件"}),
-                         "latent": ("LATENT", {"lazy": True, "tooltip": "可选：从该潜空间继续采样（图生图）"}),
+                         "latent": ("LATENT", {"lazy": True, "tooltip": "普通生成优先使用接入的 Latent，保留上游尺寸、批次数与采样数据；重绘另按编辑画布处理"}),
                          "source_image": ("IMAGE", {"lazy": True, "tooltip": "可选：图生图 / 重绘的底图"}),
                          "mask": ("MASK", {"lazy": True, "tooltip": "可选：只重绘遮罩区域，需同时接底图"})},
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO",
@@ -152,6 +180,13 @@ class AllBuyGenerate:
             return []
         definition = dynprompt.get_node(str(unique_id)) if dynprompt is not None else (prompt or {}).get(str(unique_id), {})
         inputs = definition.get("inputs", {})
+        if (mask is not None or "mask" in inputs) and source_image is None and "source_image" not in inputs:
+            raise ValueError("遮罩需要同时连接图片或载入编辑底图")
+        if latent is not None or "latent" in inputs:
+            if mask is None and "mask" in inputs:
+                return ["mask"]
+            if mask is None or is_default_loader_mask(mask, prompt, unique_id, dynprompt):
+                return ["latent"] if latent is None and "latent" in inputs else []
         if source_image is not None or "source_image" in inputs:
             return [name for name, value in (("source_image", source_image), ("mask", mask))
                     if value is None and name in inputs]
@@ -169,7 +204,8 @@ class AllBuyGenerate:
     DESCRIPTION = (
         "原生采样与解码节点，覆盖文生图、图生图、遮罩重绘与扩图。"
         "接 source_image 即图生图；再接 mask 只重绘遮罩区域（配合羽化）；"
-        "接 latent 则从该潜空间继续采样。节点内最近预览展示上一次运行结果。"
+        "普通生成接 latent 时优先从该潜空间采样并沿用其尺寸；底图仍可用于上游参考图编码。"
+        "节点内最近预览展示上一次运行结果。"
         "edit_json / original_image / input_resize 由前端面板管理，无需手动填写。"
     )
     FUNCTION = "generate"
@@ -196,11 +232,14 @@ class AllBuyGenerate:
             mask = None
             if state.get("mask"):
                 mask = torch.from_numpy(np.asarray(load_asset(state["mask"]).convert("L"), dtype=np.float32).copy() / 255)[None]
-        elif source_image is not None:
+        else:
             # LoadImage's default black mask is not an instruction to discard
             # the whole generated result. Explicit/saved masks retain their meaning.
             if is_default_loader_mask(mask, prompt, unique_id, dynprompt):
                 mask = None
+            if latent is not None and mask is None:
+                source_image = None
+        if not state.get("enabled") and source_image is not None:
             options = json.loads(input_resize or "{}")
             if not isinstance(options, dict):
                 raise ValueError("图片缩放设置必须为对象")
@@ -219,6 +258,11 @@ class AllBuyGenerate:
                 latent = nodes.VAEEncodeForInpaint().encode(vae, base, composite_mask, grow_mask_by=6)[0]
         if latent is None:
             raise ValueError("普通生成请连接 Latent；图生图或重绘请连接图片，或载入编辑底图")
+        if not state.get("enabled") and composite_mask is None:
+            options = json.loads(input_resize or "{}")
+            if not isinstance(options, dict):
+                raise ValueError("图片缩放设置必须为对象")
+            latent = resize_latent(latent, options, vae, state.get("reference_encoding") == "qwen_image21")
         if negative is None:
             negative = nodes.ConditioningZeroOut().zero_out(positive)[0]
         samples = nodes.common_ksampler(model, seed, steps, cfg, sampler_name, scheduler,

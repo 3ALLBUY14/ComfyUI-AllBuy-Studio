@@ -194,6 +194,10 @@ function attach(node) {
       const incoming = images.filter(ref => !removed.has(historyKey(ref)));
       if (!incoming.length) { node._aitRestorePreview?.(); return; }
       selectedRef = incoming[0]; historyPicked = false;
+      if (!parseState(node, "edit_json", {}).enabled) {
+        status.textContent = "普通生成完成 · 结果已输出，不加入历史记录";
+        return;
+      }
       const seen = new Set(removed);
       refs = [...incoming, ...refs].filter(ref => { const key = historyKey(ref); if (seen.has(key)) return false; seen.add(key); return true; }).slice(0, 4);
       showHistory();
@@ -208,22 +212,26 @@ function attach(node) {
     };
     const refresh = node._aitRefresh;
     const saveImportResize = () => {
-      node.properties.allbuy_generate_import_resize = { mode: importMode.input.value, size: Number(importSize.input.value) };
+      node.properties.allbuy_generate_import_resize = { mode: importMode.input.value, size: Number(importSize.input.value), ratio: latentRatio.input.value };
       write(node, "input_resize", JSON.stringify(node.properties.allbuy_generate_import_resize));
-      importSize.input.disabled = importMode.input.value === "original";
+      importSize.input.disabled = importMode.input.value === "original" && latentRatio.input.value === "original";
       node.graph?.change?.(); node.setDirtyCanvas?.(true, true);
     };
     const importMode = field("导入缩放", "original", saveImportResize, { values: [["original", "原始尺寸"], ["longest", "最长边"], ["shortest", "最短边"]] });
     const importSize = field("目标尺寸 px", 1024, saveImportResize, { min: 1, max: 8192, step: 1 });
-    const importControls = row(importMode, importSize);
+    const latentRatio = field("比例", "original", saveImportResize, { values: [["original", "跟随输入"], ...["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"].map(ratio => [ratio, ratio])] });
+    latentRatio.title = "普通生成的 Latent 画布比例；跟随输入保留上游尺寸，不裁切导入底图";
+    importSize.title = "选定比例后设置 Latent 的最长边或最短边；原始尺寸模式按最长边计算";
+    const importControls = row(importMode, importSize, latentRatio);
     importControls.classList.add("ait-import-resize");
     importControls.title = "导入图片及普通生成连接的底图共用此缩放设置";
     const refreshImportResize = () => {
       const options = node.properties.allbuy_generate_import_resize || parseState(node, "input_resize", {});
       importMode.input.value = options?.mode || "original";
       importSize.input.value = options?.size ?? 1024;
-      importSize.input.disabled = importMode.input.value === "original";
-      node.properties.allbuy_generate_import_resize = { mode: importMode.input.value, size: Number(importSize.input.value) };
+      latentRatio.input.value = options?.ratio || "original";
+      importSize.input.disabled = importMode.input.value === "original" && latentRatio.input.value === "original";
+      node.properties.allbuy_generate_import_resize = { mode: importMode.input.value, size: Number(importSize.input.value), ratio: latentRatio.input.value };
       write(node, "input_resize", JSON.stringify(node.properties.allbuy_generate_import_resize));
     };
     let lastEdit = null;

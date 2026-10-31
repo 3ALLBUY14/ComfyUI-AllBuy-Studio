@@ -72,9 +72,11 @@ export function applyGenerateReferences(output) {
       if (input === "positive") positiveEncoderId = encoderId;
     }
     if (encoders.size) node.inputs.edit_json = JSON.stringify({ ...state, reference_encoding: "qwen_image21" });
-    // Native Qwen's third output is an empty latent matched to its first image.
-    // Use that canvas when the normal path gets its image through the encoder.
-    if (resizeNormal && positiveEncoderId && !node.inputs.source_image) node.inputs.latent = [positiveEncoderId, 2];
+    // Only replace Qwen's own automatic canvas; custom latents and switches keep their sizes.
+    const latent = node.inputs.latent;
+    if (resizeNormal && positiveEncoderId && (!latent || (latent[1] === 2 && encoders.has(String(latent[0]))))) {
+      node.inputs.latent = [positiveEncoderId, 2];
+    }
   }
   return output;
 }

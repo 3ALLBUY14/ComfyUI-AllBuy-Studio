@@ -306,12 +306,24 @@ class GenerateTests(unittest.TestCase):
             prompt=prompt, unique_id="552")
         self.assertEqual(requested, [])
 
-    def test_connected_image_requests_mask_without_old_latent(self):
-        prompt = {"552": {"inputs": {"latent": ["old-latent", 0], "source_image": ["image", 0], "mask": ["mask", 0]}}}
+    def test_connected_image_requests_mask_when_latent_unconnected(self):
+        prompt = {"552": {"inputs": {"source_image": ["image", 0], "mask": ["mask", 0]}}}
         node = gen.AllBuyGenerate()
         self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552"), ["source_image", "mask"])
         self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552", source_image=frame([1, 0, 0])), ["mask"])
         self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552", source_image=frame([1, 0, 0]), mask=torch.ones(1, 8, 16)), [])
+
+    def test_custom_latent_is_requested_ahead_of_connected_image(self):
+        node = gen.AllBuyGenerate()
+        prompt = self.loader_prompt()
+        prompt["552"]["inputs"]["latent"] = ["custom-switch", 0]
+        self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552"), ["mask"])
+        self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552", mask=torch.zeros(1, 64, 64)), ["latent"])
+        latent = {"samples": torch.zeros(2, 4, 64, 112), "downscale_ratio_spacial": 8}
+        self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552", mask=torch.zeros(1, 64, 64), latent=latent), [])
+        self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552", mask=torch.ones(1, 64, 64)), ["source_image"])
+        del prompt["552"]["inputs"]["mask"]
+        self.assertEqual(node.check_lazy_status(prompt=prompt, unique_id="552"), ["latent"])
 
     def test_normal_generation_requests_latent_and_rejects_mask_without_image(self):
         node = gen.AllBuyGenerate()
@@ -339,7 +351,12 @@ class GenerateTests(unittest.TestCase):
             def encode(self, vae, image, *args, **kwargs):
                 calls.append(("encode", image, args, kwargs)); return ({"samples": image, "noise_mask": args[0] if args else None},)
         class Decode:
-            def decode(self, vae, samples): return (torch.ones_like(samples["samples"]),)
+            def decode(self, vae, samples):
+                latent = samples["samples"]
+                if "downscale_ratio_spacial" in samples:
+                    stride = samples.get("downscale_ratio_spacial", 8)
+                    return (torch.ones(latent.shape[0], latent.shape[-2] * stride, latent.shape[-1] * stride, 3),)
+                return (torch.ones_like(latent),)
         class Zero:
             def zero_out(self, positive): return ("zero",)
         def sample(*args, **kwargs): calls.append(("sample", args, kwargs)); return (args[8],)
@@ -363,6 +380,65 @@ class GenerateTests(unittest.TestCase):
         _, args, kwargs = self.calls[-1]
         self.assertEqual(args[:8], ("model", 123, 20, 7, "euler", "normal", "positive", "zero"))
         self.assertIs(args[8], latent); self.assertEqual(kwargs["denoise"], .5)
+
+    def test_custom_latent_dimensions_and_metadata_survive_connected_image(self):
+        latent = {"samples": torch.zeros(2, 4, 64, 112), "downscale_ratio_spacial": 8,
+                  "noise_mask": torch.ones(2, 64, 112), "batch_index": [3, 4]}
+        prompt = self.loader_prompt()
+        prompt["552"]["inputs"]["latent"] = ["custom-switch", 0]
+        for mask in (None, torch.zeros(1, 64, 64)):
+            with self.subTest(mask=mask is not None):
+                self.calls.clear()
+                _, _, samples = self.generate(latent=latent, source_image=frame([1, 0, 0], 80, 160), mask=mask,
+                    prompt=prompt, unique_id="552", input_resize='{"mode":"longest","size":1536}')
+                self.assertEqual([call[0] for call in self.calls], ["sample"])
+                self.assertIs(self.calls[0][1][8], latent)
+                self.assertIs(samples, latent)
+                self.assertEqual(tuple(samples["samples"].shape), (2, 4, 64, 112))
+                self.assertEqual(samples["downscale_ratio_spacial"], 8)
+                self.assertEqual(samples["batch_index"], [3, 4])
+
+    def test_explicit_inpaint_keeps_image_canvas_even_with_latent(self):
+        _, image, _ = self.generate(latent={"samples": torch.zeros(1, 4, 32, 64)},
+            source_image=frame([1, 0, 0], 16, 16), mask=torch.ones(1, 16, 16))
+        self.assertEqual(self.calls[0][0], "encode")
+        self.assertEqual(tuple(image.shape), (1, 16, 16, 3))
+
+    def test_latent_ratio_controls_sampling_size_and_preserves_batch_metadata(self):
+        latent = {"samples": torch.zeros(2, 4, 32, 32), "downscale_ratio_spacial": 8,
+                  "noise_mask": torch.ones(1, 32, 32), "batch_index": [7, 8]}
+        for mode, ratio, target, width, height in (
+            ("longest", "16:9", 256, 256, 144),
+            ("shortest", "16:9", 144, 256, 144),
+            ("longest", "9:16", 256, 144, 256),
+            ("original", "1:1", 192, 192, 192),
+        ):
+            with self.subTest(mode=mode, ratio=ratio):
+                self.calls.clear()
+                _, image, result = self.generate(latent=latent, input_resize=json.dumps({"mode": mode, "ratio": ratio, "size": target}))
+                self.assertEqual(tuple(image.shape), (2, height, width, 3))
+                self.assertEqual(tuple(result["samples"].shape), (2, 4, height // 8, width // 8))
+                self.assertEqual(result["batch_index"], [7, 8])
+                self.assertIs(result["noise_mask"], latent["noise_mask"])
+                self.assertEqual(result["downscale_ratio_spacial"], 8)
+        self.assertEqual(tuple(latent["samples"].shape), (2, 4, 32, 32))
+
+    def test_latent_ratio_follows_input_by_default_and_aligns_qwen(self):
+        latent = {"samples": torch.zeros(1, 4, 32, 32), "downscale_ratio_spacial": 8}
+        self.assertIs(gen.resize_latent(latent, {"size": 1536}, object()), latent)
+        vae = types.SimpleNamespace(spacial_compression_encode=lambda: 16)
+        result = gen.resize_latent(latent, {"mode": "longest", "ratio": "16:9", "size": 512}, vae, True)
+        self.assertEqual(tuple(result["samples"].shape), (1, 4, 36, 64))
+        for options in ({"ratio": "bad"}, {"ratio": "1:1", "size": 0},
+                        {"ratio": "1:1", "size": 1.5}, {"ratio": "16:9", "mode": "shortest", "size": 8192}):
+            with self.assertRaises(ValueError): gen.resize_latent(latent, options, vae)
+
+    def test_saved_edit_ignores_latent_ratio_override(self):
+        with patch.object(gen, "load_asset", return_value=Image.new("RGB", (16, 32), "red")):
+            _, image, _ = self.generate(latent={"samples": torch.zeros(1, 4, 16, 16)},
+                edit_json='{"enabled":true,"source":"saved.png"}',
+                input_resize='{"mode":"longest","ratio":"1:1","size":256}')
+        self.assertEqual(tuple(image.shape), (1, 32, 16, 3))
 
     def test_inpaint_preserves_unmasked_pixels(self):
         source = frame([1, 0, 0], 16, 16); mask = torch.zeros(1, 16, 16); mask[:, 4:12, 4:12] = 1

@@ -240,7 +240,7 @@ async def check_generate_resize_and_reimport(page, png, asset, destination):
         await page.evaluate("testNodes.AllBuyGenerate.onConfigure()")
         await page.wait_for_function("testNodes.AllBuyGenerate._aitRoot.querySelector('.ait-import-resize select').value==='shortest'")
         assert await target.input_value() == "640"
-        assert await page.evaluate("JSON.parse(testNodes.AllBuyGenerate.widgets.find(w=>w.name==='input_resize').value)") == {"mode": "shortest", "size": 640}
+        assert await page.evaluate("JSON.parse(testNodes.AllBuyGenerate.widgets.find(w=>w.name==='input_resize').value)") == {"mode": "shortest", "size": 640, "ratio": "original"}
         await generate.locator(".ait-generate-controls").evaluate("root=>root.scrollTop=0")
         await generate.screenshot(path=str(destination / "generate-import-resize.png"))
         await generate.get_by_role("button", name="普通生成", exact=True).click()
@@ -257,8 +257,24 @@ async def check_generate_resize_and_reimport(page, png, asset, destination):
           return {resize,latent:node.inputs.latent,encoder:node.inputs.positive[0],enabled:JSON.parse(node.inputs.edit_json).enabled||false,original:output['2'].inputs};
         }""")
         assert normal_resize["resize"] == {"class_type":"AllBuyImageResize", "inputs":{"image":["1",0], "mode":"shortest", "size":640}}
-        assert normal_resize["latent"] == [normal_resize["encoder"], 2] and not normal_resize["enabled"]
+        assert normal_resize["latent"] == ["old-latent", 0] and not normal_resize["enabled"]
         assert normal_resize["original"] == {"images.image_1":["1",0], "resolution":1024}
+        ratio = generate.get_by_label("比例", exact=True)
+        assert await ratio.input_value() == "original"
+        await mode.select_option("original")
+        assert await target.is_disabled()
+        await ratio.select_option("16:9")
+        assert await target.is_enabled()
+        await target.fill("1536")
+        await page.evaluate("testNodes.AllBuyGenerate.onConfigure()")
+        await page.evaluate("new Promise(resolve=>requestAnimationFrame(resolve))")
+        assert await ratio.input_value() == "16:9"
+        assert await page.evaluate("JSON.parse(testNodes.AllBuyGenerate.widgets.find(w=>w.name==='input_resize').value)") == {"mode":"original", "size":1536, "ratio":"16:9"}
+        await generate.locator(".ait-generate-controls").evaluate("root=>root.scrollTop=0")
+        await page.locator(".host-card").nth(3).screenshot(path=str(destination / "generate-latent-ratio.png"))
+        await drop("replacement.png", replacement_png); await wait_source(replacement_asset)
+        await page.wait_for_function("()=>{const image=testNodes.AllBuyGenerate._aitRoot.querySelector('.ait-preview img');return image.complete&&image.naturalWidth===320&&image.naturalHeight===480}")
+        await ratio.select_option("original")
         await mode.select_option("original")
         uploads_before = len(resized_sizes)
         await drop("replacement.png", replacement_png); await wait_source(replacement_asset)
@@ -293,6 +309,7 @@ async def check_generate_preview(page, png, asset, destination, scrub=None):
     assert await generate_image.get_attribute("src") == live_url
     await page.evaluate("testApiEmit('executed',{node:testNodes.AllBuyGenerate.id,output:{allbuy_images:[{filename:'generate-final.png',type:'temp'}]}})")
     assert "generate-final.png" in await generate_image.get_attribute("src")
+    assert await generate.locator(".ait-history-item").count() == 0, "Normal generation must not create history"
     assert not await page.evaluate("async url=>{try{await fetch(url);return true}catch{return false}}", live_url)
     await page.evaluate("testApiEmit('executed',{node:testNodes.AllBuyGenerate.id,output:null})")
     assert "generate-final.png" in await generate_image.get_attribute("src")
@@ -465,6 +482,12 @@ async def check_generate_preview(page, png, asset, destination, scrub=None):
         await page.wait_for_function("count=>hostStats.queued===count", arg=before_normal+offset)
         assert set(await page.evaluate("hostStats.queueTargets")) == {"AllBuyGenerate", "preview", "router", "save"}
     await page.evaluate("const n=testNodes.AllBuyGenerate;n.outputs.forEach((output,i)=>output.links=n._savedOutputLinks[i]);n.graph._nodes=[];n.graph.links={}")
+    history_before = await generate.locator(".ait-history-item").count()
+    await page.evaluate("testNodes.AllBuyGenerate.onExecuted({allbuy_images:[{filename:'ordinary-result.png',type:'temp'}]})")
+    assert "ordinary-result.png" in await generate_image.get_attribute("src")
+    assert await generate.locator(".ait-history-item").count() == history_before
+    # History remains available for imported/edited image generation only.
+    await page.evaluate("asset=>{const n=testNodes.AllBuyGenerate;n.widgets.find(w=>w.name==='edit_json').value=JSON.stringify({enabled:true,source:asset});n._aitRefresh()}", asset)
     # A thumbnail's close button removes only that history entry, including after cached replay.
     await page.evaluate("testNodes.AllBuyGenerate.onExecuted({allbuy_images:[{filename:'remove-me.png',type:'temp'},{filename:'keep-me.png',type:'temp'}]})")
     before_delete = await generate.locator(".ait-history-item").count()
@@ -496,6 +519,7 @@ async def check_generate_preview(page, png, asset, destination, scrub=None):
     await page.locator(".host-card").nth(3).screenshot(path=str(destination / "generate-latest-four.png"))
     clear = generate.get_by_role("button", name="清空", exact=True)
     normal = generate.get_by_role("button", name="普通生成", exact=True)
+    await normal.click()
     clear_rect, normal_rect = await clear.bounding_box(), await normal.bounding_box()
     assert clear_rect["x"] > normal_rect["x"] and abs(clear_rect["y"]-normal_rect["y"]) < 1
     await page.keyboard.press("Tab")
