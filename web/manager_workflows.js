@@ -2,6 +2,7 @@ import { WorkflowLibrary, filterWorkflows, workflowData, workflowPath, workflowF
 import { mediaThumbnail, openMediaLightbox } from "./manager_media.js";
 import { showManagerContext, closeManagerPopup, hasManagerPopup } from "./manager_controls.js";
 import { workflowDestinationSelect } from "./manager_workflow_destination.js";
+import { openedWorkflowTabs, saveAndCloseWorkflowTabs } from "./manager_workflow_tabs.js";
 import { WorkflowSidebar } from "./manager_workflow_sidebar.js";
 import { manageWorkflowTags, editWorkflowTags } from "./manager_workflow_tags.js";
 
@@ -81,6 +82,19 @@ export class ManagerWorkflows {
   assertClosed(item) {
     const opened = this.app.extensionManager?.workflow?.openWorkflows || [];
     if (opened.some(file => String(file.path || "").replace(/^workflows\//, "") === item.path)) throw new Error("此工作流已在页签中打开，请先关闭该页签再改名、移动或移除");
+  }
+  opened(items) { return openedWorkflowTabs(this.app, items); }
+  async saveClose(items) {
+    const h = this.host;
+    if (!h.stackEditor.allowDiscard()) return false;
+    const count = await saveAndCloseWorkflowTabs(this.app, items, { report: text => h.report(text), loadGraph: async (...args) => {
+      h.root.style.display = "none"; for (const node of h.inertSiblings) node.inert = false;
+      document.removeEventListener("keydown", h.onKey, true);
+      try { return await this.app.loadGraphData(...args); }
+      finally { h.root.style.display = ""; for (const node of h.inertSiblings) node.inert = true; document.addEventListener("keydown", h.onKey, true); }
+    } });
+    for (const item of items) this.library.cache.delete(item.path);
+    await this.afterChange(); h.report(`已保存并关闭 ${count} 个工作流页签`); return true;
   }
   async sync() { await this.app.extensionManager?.workflow?.syncWorkflows?.(); }
   async refresh() {
@@ -257,6 +271,7 @@ export class ManagerWorkflows {
     h.detail.append(el("h3", "abm-detail-title", item.name), el("p", "abm-model-path", item.path), preview);
     const controls = el("div", "abm-detail-actions"), open = this.button("打开工作流", () => this.open(item), "abm-primary"); open.disabled = h.busy || h.loading;
     controls.append(open, h.action("导出 JSON", async () => exportWorkflow(item, await this.library.read(item, globalThis.LiteGraph?.registered_node_types || {}))));
+    if (this.opened([item]).length) controls.append(h.action("保存并关闭页签", () => this.saveClose([item])));
     h.detail.append(controls, el("p", "abm-muted", new Date(Number(item.modified) * (Number(item.modified) < 1e12 ? 1000 : 1)).toLocaleString()));
     if (item.error) h.detail.appendChild(el("p", "abm-error", item.error));
     if (item.summary) {
@@ -280,11 +295,13 @@ export class ManagerWorkflows {
     const { host: h, el, button } = this; h.batch.replaceChildren(); const selected = this.items.filter(item => h.selection.has(item.path));
     h.batch.append(el("span", "abm-muted", `已选 ${selected.length} 项`), button("全选当前结果", () => { this.filtered().forEach(item => h.selection.add(item.path)); this.renderList(); }), button("清除选择", () => { h.selection.clear(); this.renderList(); }),
       h.action("编辑标签", () => editWorkflowTags(this, selected), !!selected.length), h.action("移动到文件夹", () => this.chooseMove(selected), !!selected.length), h.action("移除", () => this.remove(selected), !!selected.length));
+    if (this.opened(selected).length) h.batch.append(h.action("保存并关闭页签", () => this.saveClose(selected)));
   }
   context(item, anchor, event) {
     const h = this.host, chosen = h.selection.has(item.path) ? this.items.filter(row => h.selection.has(row.path)) : [item];
     const action = (label, callback) => ({ label, action: () => h.run(callback) });
     showManagerContext(anchor, [{ label: "打开工作流", action: () => this.open(item) }, { label: "放大预览", action: () => this.preview(item) },
+      ...(this.opened(chosen).length ? [action(`保存并关闭页签（${this.opened(chosen).length}）`, () => this.saveClose(chosen))] : []),
       action(this.meta(item).favorite ? "取消收藏" : "收藏", () => this.library.patch(item.path, { favorite: !this.meta(item).favorite })), { separator: true },
       action("重命名", () => this.rename(item)), action("创建副本", () => this.duplicate(item)), action("移动到文件夹", () => this.chooseMove(chosen)),
       action("编辑标签", () => editWorkflowTags(this, chosen)),
@@ -368,9 +385,19 @@ export class ManagerWorkflows {
   async chooseMove(items) {
     const { host: h, el, field } = this, target = workflowDestinationSelect(this);
     const body = el("div"); body.append(field("目标文件夹", target));
-    await h.modal(`移动 ${items.length} 个工作流`, body, () => this.move(items, target.value), "移动");
+    const opened = this.opened(items), close = this.input("先保存并关闭已打开的工作流", "", "checkbox"); close.checked = true;
+    if (opened.length) body.append(field(`先保存并关闭 ${opened.length} 个已打开的工作流，再移动`, close));
+    await h.modal(`移动 ${items.length} 个工作流`, body, () => this.move(items, target.value, close.checked), "移动");
   }
-  async move(items, folder) {
+  async move(items, folder, saveClose = false) {
+    if (this.opened(items).length) {
+      if (!saveClose) {
+        if (this.host.childModal) throw new Error("请勾选先保存并关闭工作流，或手动关闭相关页签后再移动");
+        const body = this.el("p", "abm-muted", `所选文件中有 ${this.opened(items).length} 个工作流已打开。保存到原文件并关闭页签后继续移动？保存失败会停止移动。`);
+        return this.host.modal("保存关闭后移动", body, () => this.move(items, folder, true), "保存关闭并移动");
+      }
+      if (!await this.saveClose(items)) throw new Error("已取消保存关闭，工作流未移动");
+    }
     items.forEach(item => this.assertClosed(item)); let count = 0;
     try {
       for (const item of items) { await this.library.move(item.path, (folder ? folder + "/" : "") + item.path.split("/").pop()); count++; }

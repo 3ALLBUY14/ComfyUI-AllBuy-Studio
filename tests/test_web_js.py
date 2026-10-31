@@ -24,6 +24,13 @@ except ImportError:
 
 
 class WebJsSyntaxTests(unittest.TestCase):
+    def test_lora_trigger_autosave(self):
+        if shutil.which("node") is None:
+            self.skipTest("node 不在 PATH")
+        script = os.path.join(os.path.dirname(__file__), "test_lora_triggers.mjs")
+        result = subprocess.run([shutil.which("node"), script], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_image_compare_hover_and_drag(self):
         if shutil.which("node") is None:
             self.skipTest("node 不在 PATH")

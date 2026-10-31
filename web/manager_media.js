@@ -46,8 +46,16 @@ export function promptMedia(group) {
 }
 
 // Keep decoded dimensions across renders, and prefer a video's own poster to the hidden image.
-export function mediaThumbnail(record, onOpen, { compact = true, onDrop, muted = true, onMuted } = {}) {
+export function mediaThumbnail(record, onOpen, { compact = true, onDrop, muted = true, onMuted, concealed = false, onReveal } = {}) {
   const box = element("div", "abm-media");
+  if (concealed) {
+    box.classList.add("abm-media-concealed");
+    const url = record.video?.poster || record.image?.url;
+    if (url) { const image = element("img", "abm-concealed-image"); image.alt = ""; image.loading = "lazy"; image.draggable = false; image.src = url; box.appendChild(image); }
+    const veil = element("div", "abm-content-veil");
+    veil.append(element("span", "", "预览已模糊"), button("临时显示", () => onReveal?.())); box.appendChild(veil);
+    box.setAttribute("aria-label", "受保护的模型预览"); attachMediaDrop(box, onDrop); return box;
+  }
   const kind = record.video ? "video" : "image";
   const url = record.video?.poster || record.image?.url;
   const image = element("img"); image.alt = ""; image.loading = "lazy"; image.draggable = false;

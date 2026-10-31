@@ -9,6 +9,7 @@ import threading
 from urllib.parse import urlencode
 
 from . import asset_store, constants, library_store, media_asset
+from .lora_content import local_metadata
 
 _lock = threading.RLock()
 KINDS = {"image": media_asset.IMAGE_EXTS, "video": media_asset.VIDEO_EXTS}
@@ -136,6 +137,7 @@ def list_previews():
             except OSError:
                 directories[directory] = []
         result[name] = _record(name, path, overrides.get(name, {}), directories[directory])
+        result[name].update(local_metadata(path, directories[directory]))
     return {"version": 1, "models": result}
 
 

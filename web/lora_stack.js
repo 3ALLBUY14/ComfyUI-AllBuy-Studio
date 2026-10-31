@@ -18,11 +18,12 @@ import { installBypassSync, installExecutionLock, applyFillPanel, installFillRes
 import { installStackTools } from "./lora_stack_tools.js";
 import { installLoRACatalog } from "./lora_catalog.js";
 import { installLoRAScroll } from "./lora_scroll.js";
+import { bindLoRATrigger } from "./lora_triggers.js";
 import { appendUniqueEntries, validatePresetEntries } from "./manager_data.js";
 
 const NODE_NAME = "AllBuyLoRAStack";
 // 版本日志：与 videoprompt_library.js/batch_image_selector.js 同款，用户贴控制台即可核对前端新旧
-console.info("[AllBuy Studio] LoRA 堆栈前端已加载 v3.156");
+console.info("[AllBuy Studio] LoRA 堆栈前端已加载 v3.163");
 const API = "/allbuy_promptlibrary";
 const STACK_MIN_WIDTH = 560;
 const STACK_BOTTOM_GAP = 18; // 节点色底缝（测容器+18，与 videoprompt/batch/media 三兄弟一致）
@@ -901,6 +902,7 @@ function renderStack(node) {
       trig.value = entry.trigger || "";
       trig.placeholder = "触发词（输出到「触发词」口）";
       trig.title = "触发词";
+      bindLoRATrigger(trig, () => entry.name);
       stopGraph(trig);
       trig.addEventListener("input", () => {
         entry.trigger = trig.value;
@@ -921,6 +923,8 @@ function renderStack(node) {
         if (text && text.trim()) {
           entry.trigger = text.trim();
           trig.value = entry.trigger;
+          trig.dispatchEvent(new Event("input"));
+          trig.dispatchEvent(new Event("change"));
           writeStack(node);
           updateFooter(node);
           trigPaste.innerHTML = "✓";

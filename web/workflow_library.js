@@ -124,6 +124,15 @@ export class WorkflowLibrary {
   async refresh() {
     const [files, metadata, deleted, directories] = await Promise.all([this.api.listUserDataFullInfo("workflows"), this.readMetadata(), this.readTrash(), this.readDirectories()]);
     if (!Array.isArray(files)) throw new Error("工作流列表格式错误");
+    if (this.hasDirectoryListing) {
+      const markers = [...files, ...(this.directoryMarkers || [])].filter(file => typeof file.path === "string" && /(?:^|\/)(?:_allbuy-folder|\.allbuy-folder)$/.test(file.path) && file.size === 0);
+      for (const path of new Set(markers.map(file => workflowPath(file.path)))) {
+        const response = await this.api.getUserData("workflows/" + path, { cache: "no-store" });
+        if (response.status === 404) continue;
+        await this.checked(response);
+        if (await response.text() === "") await this.checked(await this.api.fetchApi("/userdata/" + encodeURIComponent("workflows/" + path), { method: "DELETE" }));
+      }
+    }
     const folders = new Set(directories);
     this.items = files.filter(file => typeof file.path === "string" && /\.json$/i.test(file.path)).map(file => {
       const path = workflowPath(file.path);
@@ -141,11 +150,14 @@ export class WorkflowLibrary {
     return this.items;
   }
   async readDirectories() {
+    this.hasDirectoryListing = false; this.directoryMarkers = [];
     if (!this.api.fetchApi) return [];
     const response = await this.api.fetchApi("/v2/userdata?path=workflows", { cache: "no-store" });
     if (response.status === 404) return []; // Older ComfyUI versions only provide the file listing.
     await this.checked(response); const entries = await response.json();
     if (!Array.isArray(entries)) throw new Error("工作流目录列表格式错误");
+    this.hasDirectoryListing = true;
+    this.directoryMarkers = entries.filter(entry => entry.type === "file" && typeof entry.path === "string" && entry.path.startsWith("workflows/")).map(entry => ({ ...entry, path: entry.path.slice(10) }));
     return entries.filter(entry => entry.type === "directory").map(entry => {
       if (typeof entry.path !== "string" || !entry.path.startsWith("workflows/")) throw new Error("工作流目录路径无效");
       return workflowPath(entry.path.slice(10));
@@ -216,6 +228,7 @@ export class WorkflowLibrary {
     path = workflowPath(path);
     if (this.folders.includes(path)) throw new Error("文件夹已存在");
     await this.checked(await this.api.storeUserData("workflows/" + path + "/_allbuy-folder", "", { overwrite: false, stringify: false, throwOnError: false }));
+    if (this.hasDirectoryListing) await this.checked(await this.api.fetchApi("/userdata/" + encodeURIComponent("workflows/" + path + "/_allbuy-folder"), { method: "DELETE" }));
   }
   async readTrash() {
     const response = await this.api.getUserData(TRASH, { cache: "no-store" });

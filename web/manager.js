@@ -1,11 +1,14 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { openEditor, uid } from "./editor_dialog.js";
-import { modelKey, categoriesOf, locatorKey, shortName, filterManagerItems, validatePresetEntries, managerAppearance, managerVisualPreferences } from "./manager_data.js";
+import { modelKey, categoriesOf, locatorKey, shortName, filterManagerItems, validatePresetEntries, managerAppearance, managerVisualPreferences, managerContentPreferences, modelContent, contentRestricted, modelInfo, normalizeLoraFilters, normalizeLoraFilterPresets } from "./manager_data.js";
 import { mediaThumbnail, openMediaLightbox, promptMedia, attachMediaDrop, previewFileKind } from "./manager_media.js";
 import { createManagerSelect, showManagerContext, hasManagerPopup, closeManagerPopup } from "./manager_controls.js";
 import { ManagerStackEditor } from "./manager_stack.js";
 import { ManagerWorkflows } from "./manager_workflows.js";
+import { bindLoRATrigger, seedLoRATriggers } from "./lora_triggers.js";
+import { editLoRATags, editLoRARecommendation } from "./manager_lora_settings.js";
+import { editModelInfo, editLoraFilters, showLoraDuplicates } from "./manager_lora_browser.js";
 
 const API = "/allbuy_promptlibrary";
 const STORAGE = "allbuy-manager.v1";
@@ -108,6 +111,11 @@ class Manager {
     this.groups = [];
     this.catalog = { tags: [], models: {} };
     this.previews = {};
+    this.contentPreferences = managerContentPreferences(prefs.contentPreferences);
+    this.revealedContent = new Set();
+    this.loraFilters = normalizeLoraFilters(prefs.loraFilters);
+    this.loraFilterPresets = normalizeLoraFilterPresets(prefs.loraFilterPresets);
+    this.duplicateJob = typeof prefs.duplicateJob === "string" ? prefs.duplicateJob : null;
     this.appearance = managerAppearance(prefs);
     this.visual = managerVisualPreferences(prefs);
     this.presets = [];
@@ -130,6 +138,14 @@ class Manager {
     this.root.tabIndex = -1;
     this.applyAppearance();
     this.build();
+    this.browsePositions = prefs.browsePositions || {};
+    this.restoreBrowsePosition();
+    this.onBrowsePosition = () => { clearTimeout(this.browseTimer); this.browseTimer = setTimeout(() => this.rememberBrowsePosition(), 180); };
+    for (const area of [this.list, this.sidebar, this.detail]) area.addEventListener("scroll", this.onBrowsePosition);
+    this.root.addEventListener("input", this.onBrowsePosition);
+    this.onPageHide = () => this.rememberBrowsePosition();
+    window.addEventListener("pagehide", this.onPageHide);
+    this.recommendationWrites = new Map();
     this.stackEditor = new ManagerStackEditor(this, { app, el, button, input, field, select });
     this.workflows = new ManagerWorkflows(this, { app, api, el, button, input, field, select, readPreferences, savePreferences });
     this.onKey = event => {
@@ -148,10 +164,23 @@ class Manager {
     for (const name of ["pointerdown", "mousedown", "wheel", "keydown", "keyup"]) this.root.addEventListener(name, event => event.stopPropagation());
     this.onSaved = event => {
       if (event.detail?.origin === "manager" || this.busy) return;
+      this.mediaClose?.(); this.revealedContent.clear();
       if (!event.detail?.locator || locatorKey(event.detail.locator) === locatorKey(this.locator)) this.refresh();
     };
     window.addEventListener("allbuy-promptlibrary-saved", this.onSaved);
     window.addEventListener("allbuy-lora-data-changed", this.onSaved);
+    this.onTriggerSaved = ({ detail }) => {
+      const { model, trigger } = detail;
+      this.catalog.triggers ||= {};
+      this.catalog.triggers[model] = trigger;
+      const focused = this.tab === "loras" && this.items().find(item => item.id === this.focused);
+      const field = focused && modelKey(focused.name) === model && this.detail.querySelector('[aria-label="激活提示词"]');
+      if (!field || document.activeElement !== field) {
+        for (const [name, draft] of this.drafts) if (modelKey(name) === model) draft.trigger = trigger;
+        if (field) field.value = trigger;
+      }
+    };
+    window.addEventListener("allbuy-lora-trigger-saved", this.onTriggerSaved);
     document.body.appendChild(this.root);
     this.inertSiblings = [...document.body.children].filter(node => node !== this.root && !node.inert);
     for (const node of this.inertSiblings) node.inert = true;
@@ -311,7 +340,31 @@ class Manager {
     grid.querySelectorAll(".abm-card").forEach(card => this.masonryObserver.observe(card));
   }
   mediaOptions(item, compact = true) {
-    return { compact, onDrop: this.tab === "loras" && this.ready.previews ? file => this.dropPreview(item, file) : undefined };
+    return { compact, concealed: this.contentConcealed(item), onReveal: () => { this.revealedContent.add(modelKey(item.name)); this.renderItems(); }, onDrop: this.tab === "loras" && this.ready.previews ? file => this.dropPreview(item, file) : undefined };
+  }
+  contentHidden(item) { return this.tab === "loras" && this.contentPreferences.mode === "hide" && (this.loading || !this.ready.catalog || !this.ready.previews || contentRestricted(item.name, this.catalog, this.previews, this.contentPreferences)); }
+  contentConcealed(item) { return this.tab === "loras" && this.contentPreferences.mode === "blur" && !this.revealedContent.has(modelKey(item.name)) && (this.loading || !this.ready.catalog || !this.ready.previews || contentRestricted(item.name, this.catalog, this.previews, this.contentPreferences)); }
+  async contentDisplaySettings() {
+    const body = el("div", "abm-modal-fields"), mode = select("NSFW 显示方式", [["show", "正常显示"], ["blur", "模糊预览"], ["hide", "隐藏模型"]], this.contentPreferences.mode);
+    const unknown = input("未评级的模型也按 NSFW 处理", "", "checkbox"); unknown.checked = this.contentPreferences.includeUnknown;
+    body.append(field("NSFW 显示方式", mode), field("未评级的模型也按 NSFW 处理", unknown), el("p", "abm-muted", "识别来源：本地 C 站 / LoRA Manager 附属信息、已保存的来源评级和手动设置。未评级不代表 SFW；不会根据文件名或图片猜测。临时显示只在本次面板有效。"));
+    await this.modal("模型内容显示", body, async () => {
+      this.mediaClose?.(); this.revealedContent.clear();
+      this.contentPreferences = managerContentPreferences({ mode: mode.value, includeUnknown: unknown.checked });
+      savePreferences({ contentPreferences: this.contentPreferences });
+      this.selection = new Set(this.selected().map(item => item.id));
+    });
+  }
+  async setContentRating(names, rating) {
+    this.mediaClose?.(); this.revealedContent.clear();
+    this.catalog = await request("/lora_catalog/update", { action: "set_content_rating", models: names, rating });
+    this.selection = new Set(this.selected().map(item => item.id));
+    this.changedLoras(); this.report("内容评级已保存");
+  }
+  async editContentRating(names) {
+    const body = el("div", "abm-modal-fields"), choice = select("内容评级", [["auto", "自动 / 清除手动评级"], ["sfw", "SFW"], ["nsfw", "NSFW"]], names.length === 1 ? this.catalog.content_ratings?.[modelKey(names[0])] || "auto" : "auto");
+    body.append(field(`设置 ${names.length} 个模型的内容评级`, choice), el("p", "abm-muted", "手动评级优先于来源信息。选择自动会解除手动覆盖，并重新使用已有来源信息。"));
+    await this.modal("设置模型内容评级", body, () => this.setContentRating(names, choice.value));
   }
   async dropPreview(item, file) {
     if (this.busy || this.loading) return;
@@ -331,8 +384,16 @@ class Manager {
     });
   }
   previewOf(item) { return this.tab === "loras" ? this.previews[modelKey(item.name)] || {} : promptMedia(item); }
-  openPreview(item, kind) {
+  async openPreview(item, kind) {
     closeManagerPopup();
+    if (this.contentHidden(item)) { this.report("此模型已隐藏，可通过内容显示设置调整"); return; }
+    if (this.contentConcealed(item)) {
+      if (this.childModal) return;
+      const body = el("p", "abm-muted", "该模型预览当前已模糊。临时显示后可查看图片或播放视频，关闭资源面板后会重新模糊。");
+      if (!await this.modal("临时显示模型预览", body, async () => { this.revealedContent.add(modelKey(item.name)); }, "临时显示")) return;
+      if (!this.root.isConnected || this.tab !== "loras") return;
+      this.renderItems();
+    }
     const record = this.previewOf(item);
     if (!record.image && !record.video) {
       if (this.tab === "loras" && this.ready.previews) this.run(() => this.editPreviewPaths(item));
@@ -348,8 +409,8 @@ class Manager {
     this.status.classList.toggle("abm-error", error);
   }
   items() { return this.tab === "workflows" ? this.workflows.items : this.tab === "stacks" ? [] : this.tab === "prompts" ? this.library?.groups || [] : this.tab === "loras" ? this.models.map(name => ({ id: name, name })) : this.presets; }
-  filtered() { return filterManagerItems(this.items(), { tab: this.tab, query: this.search.value, filter: this.filter, sort: this.sort, catalog: this.catalog, groups: this.groups }); }
-  selected() { return this.items().filter(item => this.selection.has(item.id)); }
+  filtered() { return filterManagerItems(this.items().filter(item => !this.contentHidden(item)), { tab: this.tab, query: this.search.value, filter: this.filter, sort: this.sort, catalog: this.catalog, groups: this.groups, previews: this.previews, content: this.contentPreferences, advanced: this.loraFilters }); }
+  selected() { return this.items().filter(item => this.selection.has(item.id) && !this.contentHidden(item)); }
   editable() { return this.tab === "prompts" && this.locator?.source === "user" && this.library && this.ready.prompts; }
   async run(action) {
     if (this.busy || this.loading) return;
@@ -363,10 +424,12 @@ class Manager {
   switchTab(tab) {
     if (this.busy || this.loading || tab === this.tab) return;
     if (this.tab === "workflows") this.workflows.rememberPosition();
+    else this.rememberBrowsePosition();
     this.tab = tab;
     this.selection.clear(); this.focused = null; this.filter = ""; this.search.value = ""; this.limit = PAGE_SIZE;
     savePreferences({ tab });
     if (tab === "workflows") this.workflows.restorePosition();
+    else this.restoreBrowsePosition();
     if (tab !== "workflows" && (!this.ready[tab] || tab === "stacks" && !this.modelInfo) && !this.errors[tab]) { this.refresh(); return; }
     this.render();
     this.report(this.errors[tab] || "勾选资源后，可添加到工作流", !!this.errors[tab]);
@@ -375,12 +438,15 @@ class Manager {
   async refresh() {
     if (this.tab === "workflows") return this.workflows.refresh();
     if (this.busy || this.loading) return;
+    this.mediaClose?.(); this.revealedContent.clear();
     this.loading = true;
     const epoch = ++this.epoch;
     this.report("正在读取资源…");
     this.render();
     const results = await Promise.allSettled([
-      request("/libraries"), request("/object_info/AllBuyLoRAStack"), request("/lora_groups"), request("/lora_catalog"), request("/lora_presets"), request("/lora_previews"),
+      request("/libraries"), request("/object_info/AllBuyLoRAStack"), request("/lora_groups"),
+      seedLoRATriggers((app.canvas?.graph || app.graph)?._nodes).then(() => request("/lora_catalog")),
+      request("/lora_presets"), request("/lora_previews"),
     ]);
     if (epoch !== this.epoch || !this.root.isConnected) return;
     this.errors = {};
@@ -404,7 +470,13 @@ class Manager {
     });
     // Classification failures must disable mutations instead of overwriting disk with empty defaults.
     assign(2, "groups", data => { if (!Array.isArray(data.groups)) throw new Error("LoRA 分组格式错误"); this.groups = data.groups; });
-    assign(3, "catalog", data => { if (!Array.isArray(data.tags) || !data.models) throw new Error("LoRA 标签格式错误"); this.catalog = data; });
+    assign(3, "catalog", data => {
+      if (!Array.isArray(data.tags) || !data.models) throw new Error("LoRA 标签格式错误");
+      this.catalog = data;
+      for (const [name, draft] of this.drafts) {
+        if (Object.hasOwn(data.triggers || {}, modelKey(name))) draft.trigger = data.triggers[modelKey(name)];
+      }
+    });
     assign(4, "presets", data => { if (!Array.isArray(data.presets)) throw new Error("LoRA 组合格式错误"); this.presets = data.presets; });
     assign(5, "previews", data => { if (!data.models || Array.isArray(data.models)) throw new Error("LoRA 预览数据格式错误"); this.previews = data.models; });
     if (this.ready.prompts) {
@@ -442,11 +514,36 @@ class Manager {
     closeManagerPopup();
     this.root.dataset.tab = this.tab;
     this.sortSelect.hidden = this.tab === "stacks";
-    this.search.placeholder = this.tab === "stacks" ? "筛选堆栈模型 / 激活提示词…" : this.tab === "workflows" ? "搜索工作流、模型、节点、标签和备注…" : "搜索名称、标签和内容";
+    this.search.placeholder = this.tab === "stacks" ? "筛选堆栈模型 / 激活提示词…" : this.tab === "workflows" ? "搜索工作流、模型、节点、标签和备注…" : this.tab === "loras" ? "搜索模型、底模、版本和标签…" : "搜索名称、标签和内容";
     for (const [tab, node] of Object.entries(this.tabButtons)) { node.classList.toggle("is-active", tab === this.tab); node.disabled = this.busy || this.loading; node.setAttribute("aria-pressed", String(tab === this.tab)); }
     this.heading.textContent = TABS[this.tab];
     if (this.tab === "workflows") { this.workflows.render(); return; }
     this.renderSidebar(); this.renderActions(); this.renderItems();
+    this.applyBrowsePosition();
+  }
+  rememberBrowsePosition() {
+    if (!["prompts", "loras", "presets"].includes(this.tab) || this.loading || !this.ready[this.tab] || this.pendingBrowsePosition) return;
+    this.browsePositions[this.tab] = { filter: this.filter, focused: this.focused, query: this.search.value, sort: this.sort, limit: this.limit, list: this.list.scrollTop, sidebar: this.sidebar.scrollTop, detail: this.detail.scrollTop };
+    savePreferences({ browsePositions: this.browsePositions });
+  }
+  restoreBrowsePosition() {
+    if (!["prompts", "loras", "presets"].includes(this.tab)) return;
+    const p = this.browsePositions[this.tab] || {};
+    this.filter = typeof p.filter === "string" ? p.filter : "";
+    this.focused = typeof p.focused === "string" ? p.focused : null;
+    this.search.value = typeof p.query === "string" ? p.query : "";
+    this.sort = ["manual", "name", "desc", "favorite", "updated"].includes(p.sort) ? p.sort : "manual";
+    this.sortSelect.value = this.sort;
+    this.limit = Math.max(PAGE_SIZE, Math.min(10000, Number(p.limit) || PAGE_SIZE));
+    this.pendingBrowsePosition = p;
+  }
+  applyBrowsePosition() {
+    if (!this.pendingBrowsePosition || this.loading || !this.ready[this.tab]) return;
+    const p = this.pendingBrowsePosition; this.pendingBrowsePosition = null;
+    if (this.filter && !this.sidebar.querySelector(".abm-nav-item.is-active")) { this.filter = ""; this.render(); }
+    if (this.focused && !this.items().some(item => item.id === this.focused)) { this.focused = null; this.renderDetail(); }
+    for (const key of ["list", "sidebar", "detail"]) this[key].scrollTop = Math.max(0, Number(p[key]) || 0);
+    this.onBrowsePosition?.();
   }
   navItem(label, filter, count) {
     const node = button("", () => { this.filter = filter; this.limit = PAGE_SIZE; this.render(); }, "abm-nav-item");
@@ -458,7 +555,7 @@ class Manager {
   renderDetail() {
     this.stopMedia(this.detail);
     this.detail.replaceChildren();
-    const item = this.items().find(item => item.id === this.focused);
+    const item = this.items().find(item => item.id === this.focused && !this.contentHidden(item));
     this.detail.appendChild(el("div", "abm-section-label", "资源详情"));
     if (!item) {
       this.detail.append(icon(this.tab), el("h3", "", "选一项，查看更多"), el("p", "abm-muted", "点击卡片查看内容；勾选左上角复选框可批量管理并应用到工作流。"));
@@ -484,6 +581,13 @@ class Manager {
       this.detail.append(el("p", "abm-muted", `权重 ${item.weight ?? 1} · ${categoriesOf(item).join(" / ") || "未分类"}`));
     } else if (this.tab === "loras") {
       this.detail.append(el("p", "abm-model-path", item.name));
+      const info = modelInfo(item.name, this.catalog, this.previews), infoRow = el("div", "abm-model-info-detail");
+      infoRow.append(el("p", "abm-muted", `底模：${info.base_model || "未填写"} · 版本：${info.version || "未填写"}`), this.action("底模 / 版本", () => editModelInfo(this, item, { el, input, field, request }), this.ready.catalog));
+      this.detail.appendChild(infoRow);
+      const rating = modelContent(item.name, this.catalog, this.previews);
+      const contentRow = el("div", "abm-content-rating-row");
+      contentRow.append(el("span", "abm-muted", `${rating.rating === "unknown" ? "未评级" : rating.rating.toUpperCase()} · ${rating.source}`), this.action("内容评级", () => this.editContentRating([item.name]), this.ready.catalog));
+      this.detail.appendChild(contentRow);
       const record = this.previewOf(item);
       if (record.image || record.video) this.detail.appendChild(mediaThumbnail(record, kind => this.openPreview(item, kind), this.mediaOptions(item, false)));
       else { const drop = el("div", "abm-preview-empty", "拖入图片或视频设置预览"); attachMediaDrop(drop, this.mediaOptions(item).onDrop); this.detail.appendChild(drop); }
@@ -500,12 +604,42 @@ class Manager {
       const weight = input("应用权重", draft.weight, "number");
       weight.step = "0.05"; weight.min = draft.min; weight.max = draft.max;
       weight.addEventListener("input", () => { draft.weight = weight.value; });
+      const recommended = input("推荐权重", this.catalog.recommended_weights?.[modelKey(item.name)] ?? "", "number");
+      let recommendation = this.catalog.recommendations?.[modelKey(item.name)];
+      recommended.step = "any"; recommended.min = recommendation?.min ?? -3; recommended.max = recommendation?.max ?? 3;
+      recommended.placeholder = "未设置"; recommended.disabled = !this.ready.catalog;
+      recommended.addEventListener("change", () => this.saveRecommendedWeight(item.name, recommended));
+      const weights = el("div", "abm-lora-weights");
+      weights.append(field("应用权重", weight), field("推荐权重", recommended));
+      const recommendationTools = el("div", "abm-recommendation-tools");
+      recommendationTools.append(this.action("推荐设置 / 来源", () => editLoRARecommendation(this, item, { el, button, input, field, select, request, modelKey }), this.ready.catalog), button("使用推荐", () => {
+        draft.weight = this.catalog.recommended_weights?.[modelKey(item.name)] ?? 1; weight.value = draft.weight; updateRange(); this.report("已将推荐值用于本次应用");
+      }));
+      const rangeBox = el("div", "abm-recommendation-range"), rangeMessage = el("p", "abm-muted");
+      let range;
+      const updateRange = () => {
+        if (!range) return;
+        range.value = draft.weight;
+        rangeMessage.textContent = `推荐 ${recommendation.min}～${recommendation.max} · 默认 ${recommendation.default}` + (Number(draft.weight) < recommendation.min || Number(draft.weight) > recommendation.max ? " · 本次值超出推荐区间" : "");
+      };
+      if (recommendation && recommendation.min < recommendation.max) {
+        range = input("在推荐区间内调整应用权重", draft.weight, "range"); range.min = recommendation.min; range.max = recommendation.max; range.step = "0.01";
+        range.addEventListener("input", () => { draft.weight = range.valueAsNumber; weight.value = draft.weight; updateRange(); });
+        weight.addEventListener("input", updateRange); rangeBox.append(range, rangeMessage); updateRange();
+      }
+      recommended.addEventListener("recommendation-saved", () => {
+        recommendation = this.catalog.recommendations?.[modelKey(item.name)];
+        recommended.min = recommendation?.min ?? -3; recommended.max = recommendation?.max ?? 3;
+        if (!recommendation) { rangeBox.replaceChildren(); range = null; }
+        updateRange();
+      });
       const trigger = el("textarea", "abm-input abm-textarea");
       trigger.value = draft.trigger; trigger.rows = 4;
       trigger.setAttribute("aria-label", "激活提示词");
+      bindLoRATrigger(trigger, () => item.name);
       trigger.placeholder = "输入激活提示词…";
       trigger.addEventListener("input", () => { draft.trigger = trigger.value; });
-      this.detail.append(field("应用权重", weight), field("激活提示词", trigger), el("p", "abm-muted", "参数用于本次应用。保存为组合后，可保留权重和激活提示词。"));
+      this.detail.append(weights, recommendationTools, rangeBox, field("激活提示词", trigger), el("p", "abm-muted", "激活提示词和推荐默认值自动保存；来源与区间在推荐设置中核对保存，应用权重可单独调整。"));
       const tags = el("div", "abm-chips");
       for (const tag of this.tagsOf(item)) tags.appendChild(el("span", "abm-chip", tag));
       this.detail.append(tags, this.action("编辑标签", () => this.editModelTags([item.name]), this.ready.catalog),
@@ -572,6 +706,7 @@ class Manager {
         action(`整理分类 / 标签（${chosen.length} 项）`, () => this.editPromptTaxonomy(chosen), !!this.editable()));
     } else if (this.tab === "loras") {
       entries.push(action("复制模型路径", () => copy(item.name)), { separator: true },
+        action(`内容评级（${chosen.length} 项）`, () => this.editContentRating(chosen.map(row => row.name)), this.ready.catalog),
         action(`编辑标签（${chosen.length} 项）`, () => this.editModelTags(chosen.map(row => row.name)), this.ready.catalog),
         action(`管理分组（${chosen.length} 项）`, () => this.assignGroup(chosen.map(row => row.name)), this.ready.groups),
         action("选择预览图片…", () => this.uploadPreview(item, "image"), this.ready.previews), action("选择预览视频…", () => this.uploadPreview(item, "video"), this.ready.previews),
@@ -851,24 +986,14 @@ class Manager {
     await this.modal("管理 LoRA 标签", body, async () => {}, "完成");
   }
   async editModelTags(names) {
-    this.catalog = await request("/lora_catalog");
-    const body = el("div", "abm-modal-fields");
-    const checks = [];
-    for (const tag of this.catalog.tags) {
-      const check = input(tag, "", "checkbox");
-      const counts = names.filter(name => this.catalog.models[modelKey(name)]?.includes(tag)).length;
-      check.checked = counts === names.length; check.indeterminate = counts > 0 && counts < names.length;
-      let changed = false;
-      check.addEventListener("change", () => { changed = true; });
-      checks.push({ tag, check, changed: () => changed });
-      body.appendChild(field(tag + (check.indeterminate ? "（部分模型）" : ""), check));
-    }
-    if (!checks.length) body.append(el("p", "abm-muted", "暂无标签，请先用顶部「管理标签」创建。"));
-    await this.modal(`编辑 ${names.length} 个 LoRA 的标签`, body, async () => {
-      const changed = checks.filter(row => row.changed());
-      if (!changed.length) return;
-      await this.catalogAction({ action: "patch_tags", models: names, add: changed.filter(row => row.check.checked).map(row => row.tag), remove: changed.filter(row => !row.check.checked).map(row => row.tag) });
-    });
+    await editLoRATags(this, names, { el, button, input, request });
+  }
+  applyLoraFilterPreset(preset) {
+    if (this.busy || this.loading) return;
+    const value = normalizeLoraFilterPresets([preset])[0]; if (!value) return;
+    this.loraFilters = value.advanced; this.filter = value.filter; this.search.value = value.query; this.sort = value.sort; this.sortSelect.value = this.sort;
+    this.selection.clear(); this.focused = null; this.limit = PAGE_SIZE; this.list.scrollTop = 0;
+    savePreferences({ loraFilters: this.loraFilters }); this.render(); this.rememberBrowsePosition(); this.report("已应用筛选预设：" + value.name);
   }
   renderSidebar() {
     if (this.tab === "stacks") { this.stackEditor.renderSidebar(); return; }
@@ -894,6 +1019,15 @@ class Manager {
       for (const name of [...new Set(this.items().flatMap(categoriesOf))].sort()) this.sidebar.append(this.navItem(name, "category:" + name, this.items().filter(item => categoriesOf(item).includes(name)).length));
     }
     if (this.tab === "loras") {
+      if (this.loraFilterPresets.length) {
+        caption("筛选预设");
+        for (const preset of this.loraFilterPresets) {
+          const node = button("", () => this.applyLoraFilterPreset(preset), "abm-nav-item");
+          node.append(el("span", "abm-nav-label", preset.name), icon("arrow")); node.setAttribute("aria-label", "应用筛选预设 " + preset.name); node.disabled = this.busy || this.loading; this.sidebar.appendChild(node);
+        }
+      }
+      caption("内容评级");
+      for (const [rating, label] of [["nsfw", "NSFW 模型"], ["unknown", "未评级模型"], ["sfw", "SFW 模型"]]) this.sidebar.append(this.navItem(label, "content:" + rating, this.models.filter(name => modelContent(name, this.catalog, this.previews).rating === rating).length));
       caption("自定义分组");
       for (const group of this.groups.filter(group => group.name !== "我的收藏")) this.sidebar.append(this.navItem(group.name, "group:" + group.id, group.loras.length));
       const add = button("＋ 新建分组", () => this.createLoraGroup(), "abm-sidebar-add");
@@ -924,6 +1058,10 @@ class Manager {
       this.actions.append(this.action("导入", () => this.importLibrary()), this.action("导出", () => download(this.library, this.library.name || "提示词库"), !!this.library),
         this.action("＋ 新建库", () => this.createLibrary()), this.action("＋ 提示词组", () => this.editPrompt(), !!this.editable(), true));
     } else if (this.tab === "loras") {
+      const tools = { el, button, input, field, select, request, uid, copy, savePreferences };
+      this.actions.append(this.action("高级筛选", () => editLoraFilters(this, tools), this.ready.catalog), this.action(this.duplicateJob ? "查看查重结果" : "重复检测", () => showLoraDuplicates(this, tools), this.ready.loras));
+      this.actions.append(this.action("内容显示 · " + ({ show: "正常", blur: "模糊", hide: "隐藏" })[this.contentPreferences.mode], () => this.contentDisplaySettings()));
+      if (this.revealedContent.size) this.actions.append(this.action("恢复模糊", async () => { this.mediaClose?.(); this.revealedContent.clear(); }));
       this.actions.append(this.action("管理标签", () => this.manageTags(), this.ready.catalog), this.action("保存为组合", () => this.editPreset(null, this.selected().map(item => this.draft(item.name))), this.selection.size > 0 && this.ready.presets, true));
       if (this.filter.startsWith("group:")) this.actions.append(this.action("编辑分组", () => this.editLoraGroup(), this.ready.groups));
     } else {
@@ -933,8 +1071,23 @@ class Manager {
   tagsOf(item) { return this.tab === "prompts" ? item.tags || [] : this.catalog.models?.[modelKey(item.name)] || []; }
   isFavorite(item) { return this.tab === "prompts" ? !!item.star : (this.groups.find(group => group.name === "我的收藏")?.loras || []).some(name => modelKey(name) === modelKey(item.name)); }
   draft(name) {
-    if (!this.drafts.has(name)) this.drafts.set(name, { name, weight: 1, min: -3, max: 3, enabled: true, trigger: "" });
+    if (!this.drafts.has(name)) this.drafts.set(name, { name, weight: this.catalog.recommended_weights?.[modelKey(name)] ?? 1, min: -3, max: 3, enabled: true, trigger: this.catalog.triggers?.[modelKey(name)] || "" });
     return this.drafts.get(name);
+  }
+  saveRecommendedWeight(name, control) {
+    if (!control.checkValidity()) { control.setAttribute("aria-invalid", "true"); control.reportValidity(); return; }
+    const model = modelKey(name), weight = control.value === "" ? null : control.valueAsNumber;
+    control.title = "推荐权重正在保存…";
+    const write = (this.recommendationWrites.get(model) || Promise.resolve()).catch(() => {}).then(async () => {
+      const data = await request("/lora_catalog/update", { action: "set_recommended_weight", model, weight });
+      this.catalog.recommended_weights = data.recommended_weights || {};
+      this.catalog.recommendations = data.recommendations || {};
+      control.dispatchEvent(new Event("recommendation-saved"));
+      control.title = "推荐权重已保存"; control.removeAttribute("aria-invalid");
+      if (this.root.isConnected) this.report("推荐权重已保存");
+    }).catch(error => { control.title = "保存失败：" + error.message; control.setAttribute("aria-invalid", "true"); if (this.root.isConnected) this.report(control.title, true); });
+    this.recommendationWrites.set(model, write);
+    write.finally(() => { if (this.recommendationWrites.get(model) === write) this.recommendationWrites.delete(model); });
   }
   renderItems() {
     if (this.tab === "workflows") { this.workflows.renderList(); return; }
@@ -942,6 +1095,7 @@ class Manager {
     this.masonryObserver?.disconnect();
     const filtered = this.filtered();
     this.subtitle.textContent = `${this.items().length} 项资源 · 当前显示 ${filtered.length} 项` + (this.tab === "prompts" && this.locator?.source === "builtin" ? " · 只读" : "");
+    if (this.tab === "loras" && this.contentPreferences.mode === "hide") this.subtitle.textContent += ` · 已隐藏 ${this.items().filter(item => this.contentHidden(item)).length} 项`;
     const scroll = this.list.scrollTop;
     this.stopMedia(this.list);
     this.list.replaceChildren();
@@ -1013,6 +1167,10 @@ class Manager {
       titleRow.appendChild(favorite);
     }
     content.append(titleRow, el("p", "abm-card-description", this.tab === "prompts" ? item.note || item.positive || "暂无描述" : this.tab === "loras" ? modelKey(item.name).split("/").slice(0, -1).join("/") || "LoRA 根目录" : `${item.entries.length} 个 LoRA · ${item.entries.filter(entry => entry.enabled !== false).length} 个启用`));
+    if (this.tab === "loras") {
+      const info = modelInfo(item.name, this.catalog, this.previews);
+      if (info.base_model || info.version) { const line = el("p", "abm-model-info-line", [info.base_model, info.version].filter(Boolean).join(" · ")); line.title = line.textContent; content.appendChild(line); }
+    }
     const tags = el("div", "abm-chips");
     for (const tag of (this.tab === "prompts" ? [...categoriesOf(item), ...this.tagsOf(item)] : this.tagsOf(item)).slice(0, 3)) tags.appendChild(el("span", "abm-chip", tag));
     if (this.tab === "loras" && !tags.childElementCount) tags.appendChild(el("span", "abm-chip abm-subtle", "未分类"));
@@ -1185,6 +1343,9 @@ class Manager {
   close() {
     if (this.busy || this.childModal) return;
     if (!this.stackEditor.allowDiscard()) return;
+    this.detail.querySelector('[aria-label="推荐权重"]')?.blur();
+    this.rememberBrowsePosition(); clearTimeout(this.browseTimer);
+    window.removeEventListener("pagehide", this.onPageHide);
     closeManagerPopup();
     cancelAnimationFrame(this.appearanceFrame); savePreferences(this.appearance);
     this.stackEditor.destroy();
@@ -1198,6 +1359,7 @@ class Manager {
     document.removeEventListener("keydown", this.onKey, true);
     window.removeEventListener("allbuy-promptlibrary-saved", this.onSaved);
     window.removeEventListener("allbuy-lora-data-changed", this.onSaved);
+    window.removeEventListener("allbuy-lora-trigger-saved", this.onTriggerSaved);
     manager = null;
     (this.restoreFocus?.isConnected ? this.restoreFocus : launcher)?.focus();
     launcher?.setAttribute("aria-expanded", "false");
@@ -1221,7 +1383,7 @@ function installLauncher() {
   if (document.getElementById("allbuy-manager-launcher")) return;
   const style = el("link");
   style.rel = "stylesheet";
-  style.href = new URL("./manager.css?v=3.156", import.meta.url).href;
+  style.href = new URL("./manager.css?v=3.159", import.meta.url).href;
   document.head.appendChild(style);
   launcher = button("", openManager, "abm-launcher");
   applyLauncherAppearance();

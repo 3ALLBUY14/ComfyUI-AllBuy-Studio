@@ -8,7 +8,7 @@ import { installListReorder, reorderIds } from "./list_reorder.js";
 import { installLibraryPicker } from "./library_picker.js";
 import { promptApplication } from "./manager_data.js";
 
-const PLUGIN_VERSION = "v3.156"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
+const PLUGIN_VERSION = "v3.163"; // 改样式/逻辑时递增，用于强制浏览器刷新缓存（与后端 constants.PLUGIN_VERSION 一致）
 
 // ---------------------------------------------------------------------------
 // 注入样式表（ComfyUI 不会自动加载 WEB_DIRECTORY 下的 CSS，必须手动注入 link）

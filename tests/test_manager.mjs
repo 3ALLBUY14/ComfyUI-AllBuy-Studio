@@ -4,6 +4,24 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../web/manager_data.js", import.meta.url), "utf8");
 const rules = await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"));
+const tabSource = readFileSync(new URL("../web/manager_workflow_tabs.js", import.meta.url), "utf8");
+const { saveAndCloseWorkflowTabs } = await import("data:text/javascript;base64," + Buffer.from(tabSource).toString("base64"));
+{
+  const events = [], one = { path: "workflows/a.json", isModified: true, changeTracker: { prepareForSave() { events.push("prepare:a"); } } }, two = { path: "workflows/b.json", isModified: true };
+  const store = { openWorkflows: [one, two], activeWorkflow: one, async saveWorkflow(file) { events.push("save:" + file.path); file.isModified = false; }, async closeWorkflow(file) { events.push("close:" + file.path); this.openWorkflows = this.openWorkflows.filter(value => value !== file); } };
+  const app = { extensionManager: { workflow: store }, async loadGraphData(data) { events.push("load"); assert.deepEqual(data.nodes, []); } };
+  assert.equal(await saveAndCloseWorkflowTabs(app, [{ path: "a.json" }, { path: "b.json" }]), 2);
+  assert.ok(events.indexOf("save:workflows/b.json") < events.indexOf("close:workflows/a.json"), "Save every draft before closing any tabs");
+  assert.ok(events.indexOf("load") < events.indexOf("close:workflows/a.json"), "Switch active canvas before unloading its tracker");
+  store.openWorkflows = [one, two]; store.saveWorkflow = async file => { if (file === two) throw new Error("disk full"); };
+  await assert.rejects(saveAndCloseWorkflowTabs(app, [{ path: "a.json" }, { path: "b.json" }]), /disk full/);
+  assert.equal(store.openWorkflows.length, 2, "Save failures keep every tab open");
+  store.saveWorkflow = async () => false;
+  await assert.rejects(saveAndCloseWorkflowTabs(app, [{ path: "a.json" }]), /未能保存/);
+  store.saveWorkflow = async () => {}; app.loadGraphData = async () => false;
+  await assert.rejects(saveAndCloseWorkflowTabs(app, [{ path: "a.json" }, { path: "b.json" }]), /切换画布失败/);
+  assert.equal(store.openWorkflows.length, 2);
+}
 const mediaSource = readFileSync(new URL("../web/manager_media.js", import.meta.url), "utf8");
 const media = await import("data:text/javascript;base64," + Buffer.from(mediaSource).toString("base64"));
 assert.equal(media.previewFileKind({ name: "portrait.PNG" }), "image");
@@ -12,6 +30,28 @@ assert.equal(media.previewFileKind({ name: "model.safetensors" }), null);
 const bothMedia = media.promptMedia({ cover: "image.png", coverVideo: "motion.mp4" });
 assert.ok(bothMedia.video.poster.endsWith("motion.mp4"), "Video poster must come from its own frame, not the hidden bound image");
 const { filterManagerItems: filter, validatePresetEntries: validate, promptApplication, appendUniqueEntries, modelKey } = rules;
+{
+  const items = ["a", "b", "c"].map(name => ({ name, id: name }));
+  const catalog = { models: { a: ["画风", "人物"], b: ["画风"], c: ["工具"] }, model_info: { a: { base_model: "Flux", version: "v2" }, b: { base_model: "SDXL", version: "v1" } } };
+  assert.deepEqual(filter(items, { tab: "loras", catalog, advanced: { bases: ["Flux"], version: "V2" } }).map(item => item.name), ["a"]);
+  assert.equal(filter(items, { tab: "loras", catalog, query: "SDXL" })[0].name, "b");
+  assert.deepEqual(filter(items, { tab: "loras", catalog, advanced: { includeTags: ["画风", "人物"], tagMode: "all" } }).map(item => item.name), ["a"]);
+  assert.deepEqual(filter(items, { tab: "loras", catalog, advanced: { includeTags: ["画风"], excludeTags: ["人物"] } }).map(item => item.name), ["b"]);
+  assert.deepEqual(filter(items, { tab: "loras", catalog, advanced: { bases: [""] } }).map(item => item.name), ["c"]);
+  assert.equal(rules.normalizeLoraFilterPresets([{ id: "a", name: "One" }, { id: "a", name: "duplicate" }, { name: "invalid" }]).length, 1);
+  assert.equal(rules.normalizeLoraFilters(null).tagMode, "any");
+}
+{
+  const catalog = { content_ratings: { a: "nsfw", b: "sfw" }, recommendations: { b: { content: { rating: "nsfw" } } } };
+  const items = ["a", "b", "c"].map(name => ({ id: name, name }));
+  assert.deepEqual(rules.managerContentPreferences(null), { mode: "blur", includeUnknown: false });
+  assert.equal(rules.modelContent("b", catalog).rating, "sfw", "Manual label overrides source metadata");
+  assert.deepEqual(filter(items, { tab: "loras", catalog, content: { mode: "hide" } }).map(item => item.name), ["b", "c"]);
+  assert.deepEqual(filter(items, { tab: "loras", catalog, content: { mode: "hide", includeUnknown: true } }).map(item => item.name), ["b"]);
+  assert.equal(filter(items, { tab: "loras", catalog, filter: "content:nsfw" }).length, 1);
+  assert.equal(filter(items, { tab: "loras", catalog, query: "a", content: { mode: "hide" } }).length, 0, "Search cannot bypass hidden content");
+  assert.equal(filter(items, { tab: "loras", catalog, groups: [{ id: "g", loras: ["a"] }], filter: "group:g", content: { mode: "hide" } }).length, 0);
+}
 assert.deepEqual(rules.managerAppearance(), { scale: 100, fontSize: 13 });
 assert.deepEqual(rules.managerAppearance({ scale: 120, fontSize: 16 }), { scale: 120, fontSize: 16 });
 assert.deepEqual(rules.managerAppearance({ scale: 900, fontSize: -2 }), { scale: 140, fontSize: 11 });

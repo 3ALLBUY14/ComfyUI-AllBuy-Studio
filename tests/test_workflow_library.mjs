@@ -93,6 +93,23 @@ directoryApi.fetchApi = async () => Response.json([{ path: "outside/dir", type: 
 await assert.rejects(withEmpty.refresh(), /路径无效/);
 directoryApi.fetchApi = async () => new Response("missing route", { status: 404 }); await withEmpty.refresh();
 assert.ok(withEmpty.folders.includes("示例/子目录"), "File-based fallback supports older ComfyUI");
+{
+  const markers = new Map([["workflows/空目录/_allbuy-folder", ""], ["workflows/有内容/_allbuy-folder", "keep"]]);
+  const dirs = new Set(["空目录", "有内容"]);
+  const modern = new WorkflowLibrary({ ...api,
+    async listUserDataFullInfo() { return [...markers].map(([path, body]) => ({ path: path.slice(10), size: body.length })); },
+    async getUserData(path) { return markers.has(path) ? new Response(markers.get(path)) : new Response("", { status: 404 }); },
+    async storeUserData(path, body) { markers.set(path, body); const parts = path.slice(10).split("/"); parts.pop(); dirs.add(parts.join("/")); return new Response(); },
+    async fetchApi(url, options) {
+      if (options?.method === "DELETE") { markers.delete(decodeURIComponent(url.slice("/userdata/".length))); return new Response(null, { status: 204 }); }
+      return Response.json([...dirs].map(path => ({ path: "workflows/" + path, type: "directory" })));
+    },
+  });
+  await modern.refresh(); assert.ok(!markers.has("workflows/空目录/_allbuy-folder"), "Remove only empty internal markers from native workflow listings");
+  assert.equal(markers.get("workflows/有内容/_allbuy-folder"), "keep", "Never remove a nonempty same-named user file");
+  assert.ok(modern.folders.includes("空目录")); await modern.createFolder("新空目录"); await modern.refresh();
+  assert.ok(modern.folders.includes("新空目录")); assert.ok(!markers.has("workflows/新空目录/_allbuy-folder"), "New folders must not leave visible placeholder files");
+}
 await assert.rejects(library.createFolder("示例/子目录"), /已存在/);
 await library.tagAction("create", "未使用标签"); assert.ok(workflowTags(library.metadata).includes("未使用标签"));
 await assert.rejects(library.tagAction("create", "未使用标签"), /已存在/);

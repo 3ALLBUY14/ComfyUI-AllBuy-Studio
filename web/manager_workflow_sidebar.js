@@ -1,5 +1,6 @@
 import { workflowFolderRows, workflowTags } from "./workflow_library.js";
 import { showManagerContext } from "./manager_controls.js";
+import { bindWorkflowMarquee } from "./manager_workflow_marquee.js";
 
 const chevron = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m6 3 5 5-5 5"/></svg>';
 const folderIcon = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 5a1 1 0 0 1 1-1h5l2 2h7a1 1 0 0 1 1 1v9H2Z"/></svg>';
@@ -16,6 +17,7 @@ export class WorkflowSidebar {
     this.foldersOpen = state.foldersOpen !== false; this.tagsOpen = state.tagsOpen === true;
     this.width = Math.max(180, Math.min(380, Number(state.width) || 210)); this.query = "";
     this.selected = new Set(); this.multiselect = false; this.rootMultiselect = false;
+    this.unbindMarquee = bindWorkflowMarquee(this);
   }
   save() {
     this.savePreferences({ workflowSidebar: { expanded: [...this.expanded], pinned: this.pinned, foldersOpen: this.foldersOpen, tagsOpen: this.tagsOpen, width: this.width, position: this.workflows.position || {} } });
@@ -62,6 +64,8 @@ export class WorkflowSidebar {
     if (this.selected.size) {
       const batch = el("div", "abm-folder-batch");
       batch.append(el("span", "abm-muted", `已选 ${this.selected.size} 个`), w.button("清除", () => { this.selected.clear(); this.render(); }), h.action("移入回收站", () => w.removeFolders([...this.selected]), !h.busy && !h.loading)); this.scroll.appendChild(batch);
+      const contained = w.items.filter(item => [...this.selected].some(path => item.path.startsWith(path + "/")));
+      if (w.opened(contained).length) batch.appendChild(h.action("保存并关闭页签", () => w.saveClose(contained)));
     }
     this.folderBody = el("div", "abm-tree-body"); this.folderBody.hidden = !this.foldersOpen;
     const search = w.input("搜索文件夹", this.query, "search"); search.placeholder = "搜索目录 / 根目录文件"; search.classList.add("abm-folder-search");
@@ -162,9 +166,11 @@ export class WorkflowSidebar {
     row.addEventListener("contextmenu", event => {
       event.preventDefault(); event.stopPropagation();
       const chosen = this.selected.has(path) ? [...this.selected] : [path];
+      const contained = w.items.filter(item => chosen.some(folder => item.path.startsWith(folder + "/")));
       showManagerContext(select, [{ label: this.pinned.includes(path) ? "取消固定文件夹" : "固定到常用文件夹", action: () => this.pin(path) },
         { label: "在目录树中定位", action: () => { this.query = ""; this.reveal(path + "/"); const target = [...this.tree.children].find(node => node.dataset.folder === path); target?.focus(); target?.scrollIntoView({ block: "nearest" }); } },
         { label: this.selected.has(path) ? "取消选择文件夹" : "选择此文件夹", action: () => this.selectFolder(path) },
+        ...(w.opened(contained).length ? [{ label: `保存并关闭目录内页签（${w.opened(contained).length}）`, disabled: h.busy || h.loading, action: () => h.run(() => w.saveClose(contained)) }] : []),
         { separator: true }, { label: "移入回收站", description: `（${chosen.length} 个文件夹）`, danger: true, disabled: h.busy || h.loading, action: () => h.run(() => w.removeFolders(chosen)) }], event.clientX, event.clientY);
     });
     row.addEventListener("keydown", event => {
@@ -258,5 +264,5 @@ export class WorkflowSidebar {
       grip.addEventListener("pointermove", move); grip.addEventListener("pointerup", end); grip.addEventListener("pointercancel", end); grip.addEventListener("lostpointercapture", end);
     }); return grip;
   }
-  destroy() { this.endResize?.(); }
+  destroy() { this.unbindMarquee?.(); this.endResize?.(); }
 }

@@ -17,6 +17,8 @@ from PIL import Image
 
 from . import library_store, constants, random_draw, batch_image_node, media_asset, cover, lora_groups_store, lora_presets_store, lora_catalog_store, asset_store
 from . import lora_preview_store
+from . import lora_recommendations
+from . import lora_duplicates
 
 P = constants.API_PREFIX
 
@@ -279,6 +281,50 @@ async def lora_catalog_update(request):
         return _json_error(e, 403)
     except Exception as e:  # noqa: BLE001
         return _json_error(e)
+
+
+@_post("/lora_recommendation/fetch")
+async def lora_recommendation_fetch(request):
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise ValueError("来源查询格式错误")
+        result = await asyncio.to_thread(lora_recommendations.fetch_recommendation, data.get("model"), data.get("url", ""))
+        return web.json_response({"ok": True, "recommendation": result})
+    except ValueError as error:
+        return _json_error(error, 400)
+    except Exception:  # noqa: BLE001
+        return _json_error("来源读取失败，请稍后重试", 502)
+
+
+@_post("/lora_duplicates/start")
+async def lora_duplicates_start(request):
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise ValueError("查重请求格式错误")
+        return web.json_response({"ok": True, "job": lora_duplicates.scanner.start(data.get("models"))})
+    except ValueError as error:
+        return _json_error(error, 400)
+
+
+@_get("/lora_duplicates/state")
+async def lora_duplicates_state(request):
+    try:
+        return web.json_response({"ok": True, "job": lora_duplicates.scanner.snapshot(request.query.get("id", ""))})
+    except ValueError as error:
+        return _json_error(error, 404)
+
+
+@_post("/lora_duplicates/cancel")
+async def lora_duplicates_cancel(request):
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise ValueError("取消请求格式错误")
+        return web.json_response({"ok": True, "job": lora_duplicates.scanner.cancel(data.get("id", ""))})
+    except (ValueError, TypeError) as error:
+        return _json_error(error, 400)
 
 
 # ---------------------------------------------------------------------------
