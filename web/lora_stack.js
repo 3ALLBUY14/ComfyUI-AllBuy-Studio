@@ -23,7 +23,7 @@ import { appendUniqueEntries, validatePresetEntries } from "./manager_data.js";
 
 const NODE_NAME = "AllBuyLoRAStack";
 // 版本日志：与 videoprompt_library.js/batch_image_selector.js 同款，用户贴控制台即可核对前端新旧
-console.info("[AllBuy Studio] LoRA 堆栈前端已加载 v3.163");
+console.info("[AllBuy Studio] LoRA 堆栈前端已加载 v3.165");
 const API = "/allbuy_promptlibrary";
 const STACK_MIN_WIDTH = 560;
 const STACK_BOTTOM_GAP = 18; // 节点色底缝（测容器+18，与 videoprompt/batch/media 三兄弟一致）
@@ -336,7 +336,7 @@ function showLoraPicker(node, anchor, entry = null) {
   stopGraph(search);
   pop.appendChild(search);
 
-  const picker = node._aloraCatalog?.pickerControls(() => render());
+  const picker = node._aloraCatalog?.pickerControls(() => render(), !!entry);
   if (picker) pop.appendChild(picker.bar);
   const groupView = node.properties?.allbuyLoraPickerGroups || {};
   const collapsed = new Set(Array.isArray(groupView.collapsed) ? groupView.collapsed : []);
@@ -361,7 +361,7 @@ function showLoraPicker(node, anchor, entry = null) {
   groupFilter.addEventListener("change", () => { saveGroupView(); render(); });
   if (picker) picker.bar.prepend(groupFilter);
   else pop.appendChild(groupFilter);
-  const decorate = (row, name) => node._aloraCatalog?.decoratePickerRow(row, name, (tag) => picker?.setTag(tag));
+  const decorate = (row, name) => node._aloraCatalog?.decoratePickerRow(row, name, (tag) => picker?.setTag(tag), () => picker?.refresh());
 
   const list = document.createElement("div");
   list.className = "alora-pop-list";
@@ -382,7 +382,8 @@ function showLoraPicker(node, anchor, entry = null) {
       if (node._stackFilterInput) node._stackFilterInput.value = "";
       writeStack(node);
       renderStack(node);
-      close();
+      if (entry) close();
+      else picker?.refresh();
     };
 
     const matches = (name) => node._aloraCatalog
@@ -458,7 +459,8 @@ function showLoraPicker(node, anchor, entry = null) {
             added++;
           }
           if (added) { node._aloraCatalog?.revealEntries(); writeStack(node); renderStack(node); }
-          close();
+          if (entry) close();
+          else picker?.refresh();
         }, "alora-grp-addall",
       ));
       for (const name of members) {

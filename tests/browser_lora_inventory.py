@@ -49,10 +49,11 @@ def main():
                 if path.startswith("/extensions/test/"):
                     file = ROOT / "web" / path.removeprefix("/extensions/test/")
                     return request.fulfill(content_type="text/css" if file.suffix == ".css" else "text/javascript", body=file.read_bytes())
+                if path.endswith("/lora_groups"): return request.fulfill(json={"groups": [{"id": "classified", "name": "已整理", "loras": [names[0]]}, {"id": "fav", "name": "我的收藏", "loras": [names[2]]}]})
                 if path == "/demo.png": return request.fulfill(content_type="image/png", body=png.getvalue())
                 if path.endswith("/lora_catalog/update"): return request.fulfill(json={"ok": True, **store.update_catalog(request.request.post_data_json)})
                 if path.endswith("/lora_catalog"): return request.fulfill(json={"ok": True, **store.load_catalog()})
-                if path.endswith("/lora_previews"): return request.fulfill(json={"models": {name: {**content.local_metadata(file), "image": {"url": "/demo.png"}} for name, file in files.items()}})
+                if path.endswith("/lora_previews"): return request.fulfill(json={"models": {name: {**content.local_metadata(file), **({"image": {"url": "/demo.png"}} if name != names[2] else {})} for name, file in files.items()}})
                 if path == "/object_info/AllBuyLoRAStack": return request.fulfill(json=definitions)
                 if path.endswith("/lora_duplicates/start"): return request.fulfill(json={"ok": True, "job": scanner.start(request.request.post_data_json["models"])})
                 if path.endswith("/lora_duplicates/state"): return request.fulfill(json={"ok": True, "job": scanner.snapshot(parse_qs(url.query)["id"][0])})
@@ -60,10 +61,30 @@ def main():
                 return request.fulfill(json={"libraries": [], "presets": [], "groups": [], "models": {}})
             page.route("**/*", route); page.goto("http://127.0.0.1:9999/"); page.add_script_tag(type="module", content=BOOT); page.locator("#allbuy-manager-launcher").click()
             panel = page.locator(".abm-overlay"); panel.get_by_role("button", name="LoRA 模型", exact=True).click(); pixel = panel.get_by_role("article", name=names[0], exact=True); pixel.click()
+            sidebar = panel.locator(".abm-sidebar")
+            def nav(label): return sidebar.locator(".abm-nav-item").filter(has_text=label).first
+            assert nav("待整理").locator(".abm-count").inner_text() == "2"
+            assert nav("未分类 / 未打标签").locator(".abm-count").inner_text() == "1"
+            nav("待整理").click(); assert panel.locator(".abm-card").count() == 2
+            nav("未分类 / 未打标签").click(); assert panel.get_by_role("article", name=names[2], exact=True).count() == 1
+            nav("未加入分组").click(); assert panel.locator(".abm-card").count() == 2
+            nav("缺少预览").click(); assert panel.get_by_role("article", name=names[2], exact=True).count() == 1
+            nav("全部LoRA 模型").click(); pixel.click()
             assert "Flux · v2" in pixel.inner_text()
             panel.get_by_role("button", name="底模 / 版本", exact=True).click(); dialog = page.get_by_role("dialog", name="底模与版本 · pixel.safetensors", exact=True)
             dialog.get_by_label("模型版本", exact=True).fill("custom"); dialog.get_by_role("button", name="保存", exact=True).click(); dialog.wait_for(state="detached"); assert "custom" in pixel.inner_text()
             panel.get_by_role("button", name="底模 / 版本", exact=True).click(); dialog.get_by_label("恢复自动读取", exact=True).check(); dialog.get_by_role("button", name="保存", exact=True).click(); dialog.wait_for(state="detached"); assert "v2" in pixel.inner_text()
+            panel.get_by_role("button", name="高级筛选", exact=True).click()
+            status_filters = page.get_by_role("dialog", name="高级筛选与预设", exact=True)
+            status_filters.get_by_role("combobox", name="整理状态", exact=True).click(); page.get_by_role("option", name="未分类 / 未打标签", exact=True).click()
+            status_filters.get_by_label("筛选预设名称", exact=True).fill("待打标签")
+            status_filters.get_by_role("button", name="新建预设", exact=True).click(); shot("lora-organization-dark.png")
+            status_filters.get_by_role("button", name="应用", exact=True).click(); status_filters.wait_for(state="detached")
+            assert panel.locator(".abm-card").count() == 1
+            page.reload(); page.add_script_tag(type="module", content=BOOT); page.locator("#allbuy-manager-launcher").click()
+            panel.get_by_role("article", name=names[2], exact=True).wait_for(); assert panel.locator(".abm-card").count() == 1
+            panel.get_by_role("button", name="高级筛选", exact=True).click(); status_filters.get_by_role("button", name="清除本次筛选条件", exact=True).click()
+            status_filters.get_by_role("button", name="应用", exact=True).click(); status_filters.wait_for(state="detached")
             panel.get_by_role("button", name="高级筛选", exact=True).click(); filters = page.get_by_role("dialog", name="高级筛选与预设", exact=True)
             filters.get_by_label("筛选底模 Flux", exact=True).check(); filters.get_by_role("button", name="包含标签 画风", exact=True).click(); filters.get_by_role("button", name="排除标签 人物", exact=True).click()
             filters.get_by_label("筛选预设名称", exact=True).fill("Flux画风"); filters.get_by_role("button", name="新建预设", exact=True).click(); shot("lora-advanced-filters.png")
@@ -82,12 +103,13 @@ def main():
             store.update_catalog({"action": "set_content_rating", "models": [names[1]], "rating": "nsfw"})
             panel.get_by_role("button", name="↻ 刷新", exact=True).click(); panel.get_by_role("button", name="内容显示 ·", exact=False).click()
             display = page.get_by_role("dialog", name="模型内容显示", exact=True); display.get_by_role("combobox", name="NSFW 显示方式", exact=True).click(); page.get_by_role("option", name="隐藏模型", exact=True).click(); display.get_by_role("button", name="保存", exact=True).click(); display.wait_for(state="detached")
+            assert nav("未加入分组").locator(".abm-count").inner_text() == "1"
             panel.get_by_role("button", name="查看查重结果", exact=True).click(); result.get_by_text("未发现相同内容的可见模型", exact=True).wait_for(); assert names[1] not in result.locator(".abm-duplicate-results").inner_text(); result.get_by_role("button", name="完成", exact=True).click(); result.wait_for(state="detached")
             panel.locator(".abm-header-settings button").first.click(); panel.get_by_role("button", name="高级筛选", exact=True).click(); shot("lora-advanced-light.png")
             page.set_viewport_size({"width": 480, "height": 840}); assert not filters.evaluate("n=>n.scrollWidth>n.clientWidth")
             assert not errors, errors; browser.close()
         scanner.executor.shutdown(wait=True)
-    print("PASS: source metadata, manual/auto restore, include/exclude/base filters, named preset persistence, background duplicate results and locate-only action")
+    print("PASS: organization shortcuts/counts, untagged preset persistence, NSFW-safe counts, source metadata, manual/auto restore, include/exclude/base filters, named preset persistence, background duplicate results and locate-only action")
 
 
 if __name__ == "__main__": main()

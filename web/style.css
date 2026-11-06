@@ -2592,6 +2592,13 @@ body > .bips-lightbox-ghost { z-index: 10000; }
 .alora-picker-controls > button { flex: none; }
 .alora-pop .alora-file { flex-wrap: wrap; }
 .alora-picker-tags { flex-basis: 100%; padding-left: 14px; }
+.alora-quick-tags { flex-basis: 100%; min-width: 0; padding: 8px; margin: 4px 0;
+  border: 1px solid var(--vpl-border); border-radius: var(--vpl-r-sm); background: var(--vpl-bg-panel); color: var(--vpl-text); cursor: default; }
+.alora-quick-tag-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.alora-quick-tag-controls .vpl-input { flex: 1; min-width: 120px; padding: 4px 6px; }
+.alora-quick-tag-choices { display: flex; flex-wrap: wrap; gap: 6px; max-height: 140px; overflow-y: auto; margin: 8px 0; }
+.alora-quick-tag-choices .alora-tag-option { padding: 3px 6px; max-width: 100%; box-sizing: border-box; }
+.alora-quick-tag-choices .alora-tag-option span { overflow-wrap: anywhere; min-width: 0; }
 .alora-tag-dialog { width: min(700px, calc(100vw - 32px)); max-width: 700px; color: var(--vpl-text); }
 .alora-tag-body { display: flex; flex-direction: column; gap: 12px; }
 .alora-tag-description { font-size: 12px; color: var(--vpl-text-muted); overflow-wrap: anywhere; }

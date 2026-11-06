@@ -53,7 +53,7 @@ function chip(tag, action) {
   el.style.setProperty("--alora-tag-color", `hsl(${(hash >>> 0) % 360} 65% 72%)`);
   return el;
 }
-async function request(action) {
+async function request(action, keepPicker) {
   const response = await fetch(API + (action ? "/update" : ""), action ? {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action),
   } : { cache: "no-store" });
@@ -65,7 +65,7 @@ async function request(action) {
   }
   data = result;
   loaded = true;
-  for (const listener of listeners) listener(action);
+  for (const listener of listeners) listener(action, keepPicker);
   if (action) window.dispatchEvent(new CustomEvent("allbuy-lora-data-changed", { detail: { origin: "node" } }));
   return data;
 }
@@ -343,7 +343,7 @@ export function installLoRACatalog(node, hooks, search) {
       .catch((err) => { if (overlay.isConnected) { busy = false; report(err.message, true); sync(); } });
   };
   toolbar.append(search, sort, tagFilter, state, button("标签管理", "创建、重命名、删除和使用标签", () => editTags()), status);
-  const onData = (action) => {
+  const onData = (action, keepPicker) => {
     if (disposed) return;
     status.textContent = "";
     if (action?.action === "rename_tag" && view.tag === "#" + action.name) view.tag = "#" + action.new_name.trim();
@@ -356,7 +356,7 @@ export function installLoRACatalog(node, hooks, search) {
       if (previous !== picker.tag) node.graph?.change?.();
     }
     persist(); updateControls();
-    node._aloraPickerClose?.();
+    if (keepPicker !== node) node._aloraPickerClose?.();
     hooks.renderStack();
     node._aloraPresetTagsSync?.();
     redrawDialog?.();
@@ -387,13 +387,95 @@ export function installLoRACatalog(node, hooks, search) {
       box.appendChild(edit);
       return box;
     },
-    decoratePickerRow(row, name, onTag) {
+    decoratePickerRow(row, name, onTag, onChange) {
       const box = element("div", "alora-picker-tags");
-      for (const tag of tagsOf(name)) box.appendChild(chip(tag, () => onTag(tag)));
-      if (!tagsOf(name).length) box.appendChild(element("span", "alora-tag-empty", "未分类"));
+      const edit = button("＋标签", "快速编辑此 LoRA 的标签", () => {
+        const existing = row.querySelector(".alora-quick-tags");
+        if (existing) { existing.remove(); edit.setAttribute("aria-expanded", "false"); return; }
+        for (const panel of row.closest(".alora-pop").querySelectorAll(".alora-quick-tags")) {
+          panel.closest(".alora-file")?.querySelector(".alora-tag-edit")?.setAttribute("aria-expanded", "false");
+          panel.remove();
+        }
+        const panel = control(element("div", "alora-quick-tags"));
+        panel.setAttribute("role", "group");
+        panel.setAttribute("aria-label", "快速编辑标签：" + name);
+        panel.addEventListener("click", (event) => event.stopPropagation());
+        const input = control(element("input", "vpl-input"));
+        input.placeholder = "搜索标签 / 新标签，回车添加";
+        input.maxLength = 64;
+        input.setAttribute("aria-label", "搜索或新建标签");
+        const choices = element("div", "alora-quick-tag-choices");
+        const message = element("div", "alora-presets-message", "勾选即保存");
+        message.setAttribute("role", "status");
+        let busy = false;
+        const draw = () => {
+          choices.replaceChildren();
+          const query = input.value.trim().toLocaleLowerCase();
+          for (const tag of data.tags.slice().sort(compare).filter(tag => tag.toLocaleLowerCase().includes(query))) {
+            const label = element("label", "alora-tag-option");
+            const check = element("input", "vpl-checkbox");
+            check.type = "checkbox";
+            check.checked = tagsOf(name).includes(tag);
+            check.setAttribute("aria-label", "标签：" + tag);
+            check.addEventListener("change", () => mutate(() => request({ action: "patch_tags", models: [name],
+              add: check.checked ? [tag] : [], remove: check.checked ? [] : [tag] }, node)));
+            label.append(check, element("span", "", tag));
+            choices.appendChild(label);
+          }
+          if (!choices.childElementCount) choices.appendChild(element("span", "alora-tag-empty", "没有匹配标签，可输入名称后回车创建"));
+        };
+        const mutate = async (action) => {
+          if (busy) return;
+          busy = true;
+          for (const item of panel.querySelectorAll("input, button")) item.disabled = true;
+          try {
+            await action();
+            renderTags(); onChange?.();
+            if (panel.isConnected) {
+              message.textContent = "标签已保存"; message.classList.remove("error"); draw();
+            }
+          } catch (error) {
+            if (panel.isConnected) { message.textContent = error.message; message.classList.add("error"); draw(); }
+          } finally {
+            busy = false;
+            for (const item of panel.querySelectorAll("input, button")) item.disabled = false;
+          }
+        };
+        const add = async () => {
+          const value = input.value.trim();
+          if (!value || busy) return;
+          await mutate(async () => {
+            const tag = data.tags.find(tag => tag.toLocaleLowerCase() === value.toLocaleLowerCase()) || value;
+            if (!data.tags.includes(tag)) await request({ action: "create_tag", name: tag }, node);
+            await request({ action: "patch_tags", models: [name], add: [tag], remove: [] }, node);
+            input.value = "";
+          });
+          if (panel.isConnected) input.focus();
+        };
+        input.addEventListener("input", draw);
+        input.addEventListener("keydown", event => {
+          if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+          event.preventDefault(); if (!event.repeat) add();
+        });
+        const controls = element("div", "alora-quick-tag-controls");
+        controls.append(input, button("添加", "创建并添加标签，也可按 Enter", add), button("完成", "收起快捷标签编辑", () => {
+          panel.remove(); edit.setAttribute("aria-expanded", "false"); edit.focus();
+        }));
+        panel.append(controls, choices, message);
+        row.appendChild(panel); edit.setAttribute("aria-expanded", "true"); draw(); input.focus();
+      }, "alora-tag-edit");
+      edit.setAttribute("aria-expanded", "false");
+      edit.disabled = !loaded;
+      const renderTags = () => {
+        box.replaceChildren();
+        for (const tag of tagsOf(name)) box.appendChild(chip(tag, () => onTag(tag)));
+        if (!tagsOf(name).length) box.appendChild(element("span", "alora-tag-empty", "未分类"));
+        box.appendChild(edit);
+      };
+      renderTags();
       row.appendChild(box);
     },
-    pickerControls(onChange) {
+    pickerControls(onChange, closeAfterAdd = true) {
       const raw = node.properties?.allbuyLoraPicker || {};
       const tags = select("选择器标签筛选", [["", "全部标签"], ["@", "未分类"], ...data.tags.slice().sort(compare).map((name) => ["#" + name, name])]);
       const sorting = select("选择器排序", SORTS.filter(([value]) => ["name_asc", "name_desc", "favorite", "tag"].includes(value)));
@@ -402,10 +484,20 @@ export function installLoRACatalog(node, hooks, search) {
       const bar = element("div", "alora-picker-controls");
       const add = button("同标签加入", "加入此标签的全部可用 LoRA，跳过重复项", () => {
         addTag(tags.value.slice(1));
-        node._aloraPickerClose?.();
+        if (closeAfterAdd) node._aloraPickerClose?.();
+        else refresh();
       });
-      const sync = () => {
+      const refresh = () => {
+        const selected = tags.value;
+        tags.replaceChildren();
+        for (const [value, text] of [["", "全部标签"], ["@", "未分类"], ...data.tags.slice().sort(compare).map(tag => ["#" + tag, tag])]) {
+          const option = element("option", "", text); option.value = value; tags.appendChild(option);
+        }
+        tags.value = selected;
         add.disabled = !tags.value.startsWith("#") || !canAddTag(tags.value.slice(1));
+      };
+      const sync = () => {
+        refresh();
         node.properties = node.properties || {};
         node.properties.allbuyLoraPicker = { tag: tags.value, sort: sorting.value };
         node.graph?.change?.();
@@ -413,9 +505,9 @@ export function installLoRACatalog(node, hooks, search) {
       };
       tags.addEventListener("change", sync);
       sorting.addEventListener("change", sync);
-      add.disabled = !tags.value.startsWith("#") || !canAddTag(tags.value.slice(1));
+      refresh();
       bar.append(tags, sorting, add);
-      return { bar, tags, sorting, setTag(tag) { tags.value = "#" + tag; sync(); } };
+      return { bar, tags, sorting, refresh, setTag(tag) { tags.value = "#" + tag; sync(); } };
     },
     refresh: load,
     closeDialog() { closeDialog?.(); },

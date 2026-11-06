@@ -1,4 +1,4 @@
-import { modelKey, modelInfo, normalizeLoraFilters, normalizeLoraFilterPresets } from "./manager_data.js";
+import { modelKey, modelInfo, LORA_ORGANIZATION, normalizeLoraFilters, normalizeLoraFilterPresets } from "./manager_data.js";
 
 export async function editModelInfo(h, item, { el, input, field, request }) {
   const info = modelInfo(item.name, h.catalog, h.previews), body = el("div", "abm-modal-fields");
@@ -16,14 +16,16 @@ export async function editLoraFilters(h, { el, button, input, field, select, uid
   const presets = normalizeLoraFilterPresets(h.loraFilterPresets), name = input("筛选预设名称"), message = el("p", "abm-muted");
   const query = input("搜索模型、底模、版本", h.search.value, "search"), version = input("版本关键词", h.loraFilters.version, "search");
   const sorting = select("预设排序", [["manual", "原始顺序"], ["name", "名称 A → Z"], ["desc", "名称 Z → A"], ["favorite", "收藏优先"], ["updated", "最近更新"]], h.sort);
+  const organization = select("整理状态", [["", "全部整理状态"], ...LORA_ORGANIZATION], h.loraFilters.organization);
   const logic = select("包含标签的匹配方式", [["any", "包含任一标签"], ["all", "包含全部标签"]], h.loraFilters.tagMode);
   const bases = el("div", "abm-base-choices"), tags = el("div", "abm-filter-tag-list"), baseChecks = new Map();
   let draft = normalizeLoraFilters(h.loraFilters), scope = h.filter, chosen = "", presetSelect;
   message.setAttribute("role", "status");
-  const scopeLabel = filter => filter.startsWith("group:") ? h.groups.find(group => group.id === filter.slice(6))?.name || "原分组已不存在" : filter.startsWith("folder:") ? filter.slice(7) : filter.startsWith("tag:") ? "标签：" + filter.slice(4) : ({ "": "全部模型", favorite: "我的收藏", untagged: "未分类", "content:nsfw": "NSFW 模型", "content:sfw": "SFW 模型", "content:unknown": "未评级模型" })[filter] || "全部模型";
+  const scopeLabel = filter => filter.startsWith("group:") ? h.groups.find(group => group.id === filter.slice(6))?.name || "原分组已不存在" : filter.startsWith("folder:") ? filter.slice(7) : filter.startsWith("tag:") ? "标签：" + filter.slice(4) : filter.startsWith("organize:") ? LORA_ORGANIZATION.find(([key]) => key === filter.slice(9))?.[1] || "全部模型" : ({ "": "全部模型", favorite: "我的收藏", untagged: "未分类 / 未打标签", "content:nsfw": "NSFW 模型", "content:sfw": "SFW 模型", "content:unknown": "未评级模型" })[filter] || "全部模型";
   const range = el("p", "abm-muted");
-  const collect = () => ({ advanced: normalizeLoraFilters({ ...draft, bases: [...baseChecks].filter(([, check]) => check.checked).map(([base]) => base), version: version.value.trim(), tagMode: logic.value }), query: query.value, filter: scope, sort: sorting.value });
+  const collect = () => ({ advanced: normalizeLoraFilters({ ...draft, bases: [...baseChecks].filter(([, check]) => check.checked).map(([base]) => base), version: version.value.trim(), tagMode: logic.value, organization: organization.value }), query: query.value, filter: scope, sort: sorting.value });
   const draw = () => {
+    organization.value = draft.organization;
     range.textContent = "分类范围：" + scopeLabel(scope); bases.replaceChildren(); baseChecks.clear(); tags.replaceChildren();
     const values = new Set([...draft.bases, ...h.items().filter(item => !h.contentHidden(item)).map(item => modelInfo(item.name, h.catalog, h.previews).base_model)]);
     for (const base of [...values].sort((a, b) => a.localeCompare(b))) {
@@ -58,8 +60,9 @@ export async function editLoraFilters(h, { el, button, input, field, select, uid
   drawPresets();
   const presetActions = el("div", "abm-filter-preset-actions");
   presetActions.append(name, button("新建预设", () => perform("create")), button("覆盖", () => perform("overwrite")), button("重命名", () => perform("rename")), button("删除", () => perform("delete")));
-  const fields = el("div", "abm-filter-fields"); fields.append(field("搜索", query), field("版本关键词", version), field("排序", sorting), field("包含标签的匹配方式", logic));
-  body.append(presetsRow, presetActions, message, range, fields, el("div", "abm-section-label", "底模（不勾选表示不限）"), bases, el("div", "abm-section-label", "标签 · 排除优先"), tags,
+  const organizationField = field("整理状态", organization); organizationField.style.gridColumn = "1 / -1";
+  const fields = el("div", "abm-filter-fields"); fields.append(field("搜索", query), field("版本关键词", version), field("排序", sorting), field("包含标签的匹配方式", logic), organizationField);
+  body.append(presetsRow, presetActions, message, range, fields, el("p", "abm-muted", "待整理：未打标签或未加入自定义分组；收藏不计为分组。整理状态可与底模、标签及搜索条件组合，并保存为预设。"), el("div", "abm-section-label", "底模（不勾选表示不限）"), bases, el("div", "abm-section-label", "标签 · 排除优先"), tags,
     button("清除本次筛选条件", () => { draft = normalizeLoraFilters(); scope = ""; query.value = version.value = ""; logic.value = "any"; draw(); }), el("p", "abm-muted", "预设与筛选修改均在点击应用后保存到当前浏览器；内容显示模式保持当前设置。")); draw();
   await h.modal("高级筛选与预设", body, async () => {
     const data = collect(); h.loraFilters = data.advanced; h.loraFilterPresets = normalizeLoraFilterPresets(presets); h.search.value = data.query; h.filter = data.filter; h.sort = data.sort; h.sortSelect.value = h.sort; h.limit = 80;

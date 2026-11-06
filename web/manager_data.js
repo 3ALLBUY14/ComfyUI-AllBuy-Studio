@@ -33,9 +33,24 @@ export function modelInfo(name, catalog = {}, previews = {}) {
   const local = previews[key]?.model_info || {}, online = catalog.recommendations?.[key] || {};
   return { base_model: local.base_model || online.base_model || "", version: local.version || online.version || "", source: local.base_model || local.version ? "本地来源信息" : online.base_model || online.version ? "已保存来源" : "未填写" };
 }
+export const LORA_ORGANIZATION = [["pending", "待整理"], ["untagged", "未分类 / 未打标签"], ["ungrouped", "未加入分组"], ["missingpreview", "缺少预览"], ["missingbase", "未填写底模"]];
+export function matchesLoraOrganization(name, state, catalog = {}, groups = [], previews = {}) {
+  if (!state) return true;
+  const key = modelKey(name), untagged = !(catalog.models?.[key] || []).length;
+  const ungrouped = !groups.some(group => group.name !== "我的收藏" && (group.loras || []).some(member => modelKey(member) === key));
+  const preview = previews[key];
+  switch (state) {
+    case "pending": return untagged || ungrouped;
+    case "untagged": return untagged;
+    case "ungrouped": return ungrouped;
+    case "missingpreview": return !preview?.image?.url && !preview?.video?.url;
+    case "missingbase": return !modelInfo(name, catalog, previews).base_model.trim();
+    default: return true;
+  }
+}
 export function normalizeLoraFilters(value = {}) {
   const strings = key => Array.isArray(value?.[key]) ? [...new Set(value[key].filter(item => typeof item === "string" && item.length <= 200))].slice(0, 200) : [];
-  return { bases: strings("bases"), includeTags: strings("includeTags"), excludeTags: strings("excludeTags"), tagMode: value?.tagMode === "all" ? "all" : "any", version: typeof value?.version === "string" ? value.version.slice(0, 200) : "" };
+  return { bases: strings("bases"), includeTags: strings("includeTags"), excludeTags: strings("excludeTags"), tagMode: value?.tagMode === "all" ? "all" : "any", version: typeof value?.version === "string" ? value.version.slice(0, 200) : "", organization: LORA_ORGANIZATION.some(([key]) => key === value?.organization) ? value.organization : "" };
 }
 export function normalizeLoraFilterPresets(value) {
   if (!Array.isArray(value)) return [];
@@ -52,6 +67,8 @@ export function filterManagerItems(items, { tab, query = "", filter = "", sort =
   const result = items.filter(item => {
     if (tab === "loras") {
       if (content.mode === "hide" && contentRestricted(item.name, catalog, previews, content)) return false;
+      if (!matchesLoraOrganization(item.name, filters.organization, catalog, groups, previews)) return false;
+      if (filter.startsWith("organize:") && !matchesLoraOrganization(item.name, filter.slice(9), catalog, groups, previews)) return false;
       if (filter.startsWith("content:") && modelContent(item.name, catalog, previews).rating !== filter.slice(8)) return false;
       const info = modelInfo(item.name, catalog, previews), labels = tagsOf(item);
       if (filters.bases.length && !filters.bases.includes(info.base_model || "")) return false;

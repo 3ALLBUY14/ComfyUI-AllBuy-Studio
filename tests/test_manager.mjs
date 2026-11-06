@@ -132,3 +132,22 @@ assert.equal(widgets.get("unet_name").value, "new.safetensors"); assert.equal(st
 stackNode._allbuyManagerStack.replace({ entries: [] });
 assert.equal(serialized, "[]", "Clearing a stack must flush its serialized widget");
 console.log("Manager filtering, classification, validation, and workflow adapters passed");
+
+// Organizing work is independent of folders and favorites; media can be video-only.
+const organizeModels = [{ id: "a", name: "folder\\a.safetensors" }, { id: "b", name: "b.safetensors" }, { id: "c", name: "c.safetensors" }];
+const organize = { tab: "loras", sort: "manual", catalog: { models: { "folder/a.safetensors": ["style"], "c.safetensors": ["style"] } },
+  groups: [{ name: "我的收藏", loras: ["b.safetensors"] }, { name: "Style", loras: ["folder/a.safetensors"] }],
+  previews: { "folder/a.safetensors": { image: { url: "a.png" }, model_info: { base_model: "Flux" } }, "c.safetensors": { video: { url: "c.mp4" } } } };
+const organized = state => filter(organizeModels, { ...organize, filter: "organize:" + state }).map(item => item.id);
+assert.deepEqual(organized("pending"), ["b", "c"]);
+assert.deepEqual(organized("untagged"), ["b"]);
+assert.deepEqual(organized("ungrouped"), ["b", "c"], "Favorites are not a classification group");
+assert.deepEqual(organized("missingpreview"), ["b"], "Video-only models already have a preview");
+assert.deepEqual(organized("missingbase"), ["b", "c"]);
+assert.deepEqual(filter(organizeModels, { ...organize, advanced: { organization: "ungrouped", includeTags: ["style"] } }).map(item => item.id), ["c"]);
+const hiddenOrganize = { ...organize, catalog: { ...organize.catalog, content_ratings: { "b.safetensors": "nsfw" } }, content: { mode: "hide" }, advanced: { organization: "pending" } };
+assert.deepEqual(filter(organizeModels, hiddenOrganize).map(item => item.id), ["c"]);
+assert.equal(rules.normalizeLoraFilters({ organization: "broken" }).organization, "");
+assert.equal(rules.normalizeLoraFilterPresets([{ id: "organize", name: "To label", advanced: { organization: "untagged" } }])[0].advanced.organization, "untagged");
+organize.catalog.models["b.safetensors"] = ["new"];
+assert.deepEqual(organized("untagged"), [], "Saving tags removes a model from the untagged view");

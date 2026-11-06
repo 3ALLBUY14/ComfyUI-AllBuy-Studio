@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { openEditor, uid } from "./editor_dialog.js";
-import { modelKey, categoriesOf, locatorKey, shortName, filterManagerItems, validatePresetEntries, managerAppearance, managerVisualPreferences, managerContentPreferences, modelContent, contentRestricted, modelInfo, normalizeLoraFilters, normalizeLoraFilterPresets } from "./manager_data.js";
+import { modelKey, categoriesOf, locatorKey, shortName, filterManagerItems, validatePresetEntries, managerAppearance, managerVisualPreferences, managerContentPreferences, modelContent, contentRestricted, modelInfo, LORA_ORGANIZATION, matchesLoraOrganization, normalizeLoraFilters, normalizeLoraFilterPresets } from "./manager_data.js";
 import { mediaThumbnail, openMediaLightbox, promptMedia, attachMediaDrop, previewFileKind } from "./manager_media.js";
 import { createManagerSelect, showManagerContext, hasManagerPopup, closeManagerPopup } from "./manager_controls.js";
 import { ManagerStackEditor } from "./manager_stack.js";
@@ -1019,6 +1019,13 @@ class Manager {
       for (const name of [...new Set(this.items().flatMap(categoriesOf))].sort()) this.sidebar.append(this.navItem(name, "category:" + name, this.items().filter(item => categoriesOf(item).includes(name)).length));
     }
     if (this.tab === "loras") {
+      caption("整理快捷入口");
+      const visible = this.items().filter(item => !this.contentHidden(item));
+      for (const [key, label] of LORA_ORGANIZATION) {
+        const node = this.navItem(label, key === "untagged" ? "untagged" : "organize:" + key, visible.filter(item => matchesLoraOrganization(item.name, key, this.catalog, this.groups, this.previews)).length);
+        if (key === "pending") node.title = "未打标签或尚未加入自定义分组；收藏不计为分组";
+        this.sidebar.appendChild(node);
+      }
       if (this.loraFilterPresets.length) {
         caption("筛选预设");
         for (const preset of this.loraFilterPresets) {
@@ -1039,8 +1046,9 @@ class Manager {
     if (this.tab !== "presets") {
       caption("标签");
       const tags = this.tab === "prompts" ? [...new Set(this.items().flatMap(item => item.tags || []))] : this.catalog.tags;
+      if (this.tab === "loras") this.sidebar.append(this.navItem("未分类 / 未打标签", "untagged", this.items().filter(item => !this.contentHidden(item) && !this.tagsOf(item).length).length));
       for (const tag of tags.slice().sort()) this.sidebar.append(this.navItem("# " + tag, "tag:" + tag, this.items().filter(item => this.tagsOf(item).includes(tag)).length));
-      this.sidebar.append(this.navItem("未分类", "untagged", this.items().filter(item => !this.tagsOf(item).length).length));
+      if (this.tab !== "loras") this.sidebar.append(this.navItem("未分类", "untagged", this.items().filter(item => !this.tagsOf(item).length).length));
     }
   }
   action(text, callback, enabled = true, primary = false) {
