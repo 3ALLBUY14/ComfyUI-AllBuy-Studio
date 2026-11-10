@@ -1,0 +1,18 @@
+# comfy-cli 打包 Registry 压缩包时排除的文件（gitignore 语法；打包对象是
+# git 追踪文件减去这些，未追踪的本地文件无需列在这里）。
+# 运行时代码、web/、examples/、libraries/、README.md、LICENSE 与
+# pyproject.toml 保留在包内。
+#
+# 注意：comfy-cli 调 `git ls-files` 不处理非 ASCII 路径转义，examples/ 的
+# 中文文件名会被静默丢出发布包。本仓库已设 `git config core.quotepath false`
+# 修复；该配置不随克隆传播，换机器发布前需重新执行一次（无副作用）。
+
+# 测试与开发文件（锚定根目录，避免误伤 web/ 下的同名子目录）
+/tests/
+/docs/
+/.github/
+/.pytest_cache/
+
+# 仓库文件
+/.gitignore
+/.comfyignore

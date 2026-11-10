@@ -1,0 +1,120 @@
+"""示例工作流加载测试（对齐 NO8D 的 test_example_workflows 思路）。
+
+保证 examples/ 下每个工作流：
+1. 是合法 JSON；
+2. 用到的节点类型都在 NODE_CLASS_MAPPINGS 里（老别名也算）；
+3. links 引用的节点/槽位存在（防止改输出口后示例悄悄失效）。
+
+运行：python tests/test_examples.py
+"""
+import importlib
+import importlib.util
+import io
+import json
+import os
+import sys
+import tempfile
+import types
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+# 把插件目录挂成 "vpl" 包（目录名带连字符无法直接 import）
+PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_pkg = types.ModuleType("vpl")
+_pkg.__path__ = [os.path.join(PKG_DIR, "backend")]
+sys.modules.setdefault("vpl", _pkg)
+
+# CI/离线环境补缺失模块桩（本机有真实库时不干预）；必须在导入 vpl.* 之前
+try:
+    from tests import _offline_stubs  # noqa: F401  (unittest 包路径)
+except ImportError:
+    import _offline_stubs  # noqa: F401  (pytest 顶层模块路径)
+
+
+EXAMPLES_DIR = os.path.join(PKG_DIR, "examples")
+# 与 __init__.py 的节点模块清单保持一致，新节点模块加进 examples 前先登记
+KNOWN_TYPES = set()
+for _name in ("nodes", "batch_image_node", "media_asset", "lora_stack_node",
+              "image_compare_node", "textbox_node", "image_tools", "generate_node", "moss_layout"):
+    KNOWN_TYPES |= set(importlib.import_module(f"vpl.{_name}").NODE_CLASS_MAPPINGS)
+# 本测试不加载 ComfyUI 核心环境，示例里用到的节点单独放行：
+# - CORE_TYPES：ComfyUI 核心
+# - DEMO_TYPES：示例模板引用的第三方演示节点（Easy-Use 文本预览 / VHS 视频信息 /
+#   核心 Save 系列）。白名单只放行这几个，出现别的未知类型仍会报错拦住
+CORE_TYPES = {"CLIPTextEncode", "PreviewImage", "Note", "CheckpointLoaderSimple",
+              "UNETLoader", "VAELoader", "CLIPLoader", "SaveAudio", "SaveVideo",
+              "LoadImage", "SaveImage", "KSamplerAdvanced", "VAEDecode",
+              "TextConcatenate", "EmptyLatentImage", "EmptyFlux2LatentImage"}
+DEMO_TYPES = {"easy showAnything", "CreateVideo", "VHS_VideoInfoLoaded"}
+
+
+def _example_files():
+    return sorted(
+        os.path.join(EXAMPLES_DIR, f)
+        for f in os.listdir(EXAMPLES_DIR)
+        if f.endswith(".json")
+    )
+
+
+class ExampleWorkflowTests(unittest.TestCase):
+    def test_comfyui_entrypoint_registers_nodes_routes_and_existing_data_paths(self):
+        from aiohttp import web
+        routes = web.RouteTableDef()
+        server = types.ModuleType("server")
+        server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=routes))
+        with tempfile.TemporaryDirectory() as folder:
+            paths = types.ModuleType("folder_paths")
+            paths.get_user_directory = lambda: str(Path(folder) / "user")
+            paths.get_input_directory = lambda: str(Path(folder) / "input")
+            spec = importlib.util.spec_from_file_location("allbuy_entrypoint_test", Path(PKG_DIR) / "__init__.py",
+                                                        submodule_search_locations=[PKG_DIR])
+            plugin = importlib.util.module_from_spec(spec)
+            output = io.StringIO()
+            with patch.dict(sys.modules, {"allbuy_entrypoint_test": plugin, "server": server, "folder_paths": paths}), redirect_stdout(output):
+                spec.loader.exec_module(plugin)
+                self.assertEqual(set(plugin.NODE_CLASS_MAPPINGS), KNOWN_TYPES)
+                self.assertEqual(set(plugin.NODE_DISPLAY_NAME_MAPPINGS), KNOWN_TYPES)
+                self.assertEqual((Path(PKG_DIR) / plugin.WEB_DIRECTORY).resolve(), (Path(PKG_DIR) / "web").resolve())
+                self.assertEqual(Path(plugin.constants.EXTENSION_FOLDER), Path(PKG_DIR))
+                self.assertEqual(Path(plugin.constants.BUILTIN_LIBRARIES_FOLDER), Path(PKG_DIR) / "libraries")
+                self.assertEqual(Path(plugin.library_store.get_user_libraries_folder()), Path(folder) / "user" / "allbuy_promptlibrary")
+                self.assertTrue((Path(folder) / "user" / "allbuy_promptlibrary" / "default.json").is_file())
+                media = sys.modules["allbuy_entrypoint_test.backend.media_asset"]
+                self.assertEqual(Path(media.media_root()), Path(folder) / "input" / "allbuy_media")
+                self.assertTrue(plugin.api.register_routes())
+                self.assertIn(("GET", "/allbuy_promptlibrary/version"), {(route.method, route.path) for route in routes})
+                self.assertNotIn("失败", output.getvalue())
+
+    def test_examples_exist(self):
+        files = _example_files()
+        self.assertTrue(files, "examples/ 目录下没有任何示例工作流")
+
+    def test_each_example_loads_and_types_known(self):
+        self.assertTrue(_example_files())
+        for path in _example_files():
+            with self.subTest(example=os.path.basename(path)):
+                with open(path, "r", encoding="utf-8") as fh:
+                    wf = json.load(fh)
+                nodes = wf.get("nodes", [])
+                self.assertTrue(nodes, "工作流没有节点")
+                types_in_wf = {n.get("type") for n in nodes}
+                unknown = types_in_wf - KNOWN_TYPES - CORE_TYPES - DEMO_TYPES - {"Note"}
+                self.assertFalse(
+                    unknown,
+                    f"{os.path.basename(path)} 引用了未注册的节点类型: {unknown}",
+                )
+                # links 格式 [id, origin_id, origin_slot, target_id, target_slot, type]
+                node_ids = {n.get("id") for n in nodes}
+                for lk in wf.get("links", []):
+                    if isinstance(lk, dict):  # 新前端序列化格式
+                        origin, target = lk.get("origin_id"), lk.get("target_id")
+                    else:  # 旧数组格式
+                        origin, target = lk[1], lk[3]
+                    self.assertIn(origin, node_ids, f"link 起点 {origin} 不存在")
+                    self.assertIn(target, node_ids, f"link 终点 {target} 不存在")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

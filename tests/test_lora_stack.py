@@ -1,0 +1,425 @@
+"""LoRA 堆栈节点（lora_stack_node.py）P1 单元测试（不依赖 ComfyUI 环境）。
+
+覆盖：entries 解析容错、schema v1 白名单/缺省兜底、有效条目签名稳定、
+触发词去重保序、权重过滤、_gguf_list 聚合、IS_CHANGED 键含 LoRA 文件签名、
+GGUF 加载器缺失与模型未选择错误路径。
+
+运行：python tests/test_lora_stack.py
+"""
+import importlib
+import json
+import os
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_pkg = types.ModuleType("vpl")
+_pkg.__path__ = [os.path.join(PKG_DIR, "backend")]
+sys.modules.setdefault("vpl", _pkg)
+
+lora = importlib.import_module("vpl.lora_stack_node")
+
+
+class ParseEntriesTests(unittest.TestCase):
+    def test_garbage_json(self):
+        for raw in ("not json", "123", "{}"):
+            with self.assertRaises(ValueError):
+                lora._validated_entries(raw)
+
+    def test_empty_tolerated_as_empty(self):
+        # 空字符串与 None 都容错为空栈（stack_json 默认值即 ""）
+        self.assertEqual(lora._validated_entries(""), [])
+        self.assertEqual(lora._validated_entries(None), [])
+        self.assertEqual(lora._validated_entries("[]"), [])
+
+    def test_non_list_raises(self):
+        with self.assertRaises(ValueError):
+            lora._parse_entries('{"a":1}')
+        with self.assertRaises(ValueError):
+            lora._validated_entries("[1, 2]")
+
+    def test_schema_whitelist_and_defaults(self):
+        entry = lora._normalize_entry({"name": "a.safetensors", "weight": 1.5, "junk": 1}, 0)
+        self.assertEqual(set(entry.keys()), {"id", "name", "weight", "min", "max", "enabled", "trigger"})
+        self.assertEqual(entry["name"], "a.safetensors")
+        self.assertEqual(entry["weight"], 1.5)
+        self.assertEqual(entry["min"], 0.0)
+        self.assertEqual(entry["max"], 2.0)
+        self.assertTrue(entry["enabled"])
+        self.assertEqual(entry["trigger"], "")
+        self.assertNotIn("junk", entry)
+
+    def test_non_object_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            lora._normalize_entry("x", 2)
+        self.assertIn("第 3 条", str(ctx.exception))
+
+    def test_bad_weight_raises(self):
+        for bad in ("abc", None):
+            with self.assertRaises(ValueError):
+                lora._normalize_entry({"name": "x", "weight": bad}, 0)
+        with self.assertRaises(ValueError):
+            lora._normalize_entry({"name": "x", "weight": float("inf")}, 0)
+
+    def test_minmax_fallback(self):
+        e = lora._normalize_entry({"name": "x", "min": 5, "max": 5}, 0)
+        self.assertEqual((e["min"], e["max"]), (0.0, 2.0))
+
+
+class EffectiveSignatureTests(unittest.TestCase):
+    def _sig(self, entries):
+        return lora._effective_entry_signature([lora._normalize_entry(e, i) for i, e in enumerate(entries)])
+
+    def test_disabled_vs_enabled(self):
+        self.assertEqual(self._sig([{"enabled": False, "name": "a"}]),
+                         [{"enabled": False}])
+        self.assertEqual(self._sig([{"name": "None"}]),
+                         [{"enabled": True, "name": "None"}])
+
+    def test_zero_weight_normalized(self):
+        s = self._sig([{"name": "a.safetensors", "weight": 0.0}])
+        self.assertEqual(s, [{"enabled": True, "name": "a.safetensors", "weight": 0.0}])
+        s2 = self._sig([{"name": "a.safetensors", "weight": 0.0000001}])
+        self.assertEqual(s, s2)  # 亚阈值权重按 0 归一，缓存键稳定
+
+    def test_effective_round_and_trigger_strip(self):
+        s = self._sig([{"name": "a.safetensors", "weight": 0.123456789, "trigger": "  hi  "}])
+        self.assertEqual(s, [{"enabled": True, "name": "a.safetensors",
+                              "weight": 0.123457, "trigger": "hi"}])
+
+
+class TriggerWordsTests(unittest.TestCase):
+    def _trig(self, entries):
+        return lora._trigger_words([lora._normalize_entry(e, i) for i, e in enumerate(entries)])
+
+    def test_dedupe_casefold_order(self):
+        entries = [
+            {"name": "a", "weight": 1.0, "trigger": "cat"},
+            {"name": "b", "weight": 1.0, "trigger": " CAT "},
+            {"name": "c", "weight": 1.0, "trigger": "dog"},
+            {"name": "d", "weight": 1.0, "trigger": "dog"},
+        ]
+        self.assertEqual(self._trig(entries), "cat, dog")
+
+    def test_skip_disabled_zero_and_empty(self):
+        entries = [
+            {"name": "a", "weight": 1.0, "trigger": "keep"},
+            {"name": "b", "weight": 1.0, "enabled": False, "trigger": "no"},
+            {"name": "c", "weight": 0.0, "trigger": "zero"},
+            {"name": "d", "weight": 1.0, "trigger": "   "},
+            {"name": "None", "weight": 1.0, "trigger": "none"},
+        ]
+        self.assertEqual(self._trig(entries), "keep")
+
+
+class GgufListTests(unittest.TestCase):
+    def test_aggregate_dedupe(self):
+        class FakeFolder:
+            def __init__(self, lists):
+                self._lists = lists
+            def get_filename_list(self, key):
+                return self._lists.get(key, [])
+
+        fp = FakeFolder({
+            "unet_gguf": ["a.gguf", "b/Q4.gguf"],
+            "diffusion_models": ["b/Q4.gguf", "c.safetensors", "d.gguf"],
+            "unet": ["d.gguf", "e.gguf"],
+        })
+        orig = lora._folder_paths
+        lora._folder_paths = lambda: fp
+        try:
+            self.assertEqual(lora._gguf_list(), ["a.gguf", "b/Q4.gguf", "d.gguf", "e.gguf"])
+        finally:
+            lora._folder_paths = orig
+
+    def test_missing_keys_fallback(self):
+        class FakeFolder:
+            def get_filename_list(self, key):
+                raise Exception("no key")
+
+        orig = lora._folder_paths
+        lora._folder_paths = lambda: FakeFolder()
+        try:
+            self.assertEqual(lora._gguf_list(), [])
+        finally:
+            lora._folder_paths = orig
+
+
+class LoraFileSignatureTests(unittest.TestCase):
+    def test_missing_and_existing(self):
+        with tempfile.TemporaryDirectory() as td:
+            real = os.path.join(td, "real.safetensors")
+            with open(real, "w") as f:
+                f.write("x")
+            class FakeFolder:
+                def get_full_path(self, key, name):
+                    return real if name == "real.safetensors" else None
+
+            entries = [
+                lora._normalize_entry({"name": "real.safetensors", "weight": 1.0}, 0),
+                lora._normalize_entry({"name": "ghost.safetensors", "weight": 1.0}, 1),
+                lora._normalize_entry({"name": "off.safetensors", "weight": 1.0, "enabled": False}, 2),
+                lora._normalize_entry({"name": "zero.safetensors", "weight": 0.0}, 3),
+            ]
+            orig = lora._folder_paths
+            lora._folder_paths = lambda: FakeFolder()
+            try:
+                sigs = lora._lora_files_signature(entries)
+            finally:
+                lora._folder_paths = orig
+            self.assertEqual(len(sigs), 2)
+            by_name = dict(sigs)
+            # 钉住签名格式 "<mtime_ns>:<size>"：assertIn(":1") 钉不住字段转置（size 前置同样含 ":1"）
+            import re as _re
+            self.assertRegex(by_name["real.safetensors"], _re.compile(r"^\d+:\d+$"))
+            self.assertEqual(by_name["ghost.safetensors"], "missing")
+
+
+class ISChangedTests(unittest.TestCase):
+    def _changed(self, **kw):
+        base = {"模型类型": "UNET", "ckpt_name": "None", "unet_name": "m.safetensors",
+                "gguf_name": "None", "lora_picker": "x", "stack_json": "[]"}
+        base.update(kw)
+        return lora.AllBuyLoRAStack.IS_CHANGED(**base)
+
+    def test_stability_and_sensitivity(self):
+        a = self._changed()
+        b = self._changed()
+        self.assertEqual(a, b)
+        c = self._changed(stack_json=json.dumps([{"name": "a", "weight": 0.5}]))
+        self.assertNotEqual(a, c)
+        d = self._changed(stack_json=json.dumps([{"name": "a", "weight": 0.6}]))
+        self.assertNotEqual(c, d)
+        e = self._changed(stack_json=json.dumps([{"name": "a", "weight": 0.6, "trigger": "x"}]))
+        self.assertNotEqual(d, e)
+
+    def test_real_file_change_flips_key(self):
+        # 真实文件参与 IS_CHANGED：文件 size/mtime 变化必须换键。
+        # 删掉 IS_CHANGED 里 _lora_files_signature 那行哈希更新，此测试必红（此前全绿是空转）
+        with tempfile.TemporaryDirectory() as td:
+            real = os.path.join(td, "live.safetensors")
+            with open(real, "w") as f:
+                f.write("x")
+            class FakeFolder:
+                def get_full_path(self, key, name):
+                    return real if name == "live.safetensors" else None
+            stack = json.dumps([{"name": "live.safetensors", "weight": 0.7}])
+            orig = lora._folder_paths
+            lora._folder_paths = lambda: FakeFolder()
+            try:
+                before = self._changed(stack_json=stack)
+                with open(real, "w") as f:
+                    f.write("xy")  # size+mtime 双变，签名必变
+                after = self._changed(stack_json=stack)
+            finally:
+                lora._folder_paths = orig
+            self.assertNotEqual(before, after)
+
+    def test_zero_weight_trigger_intentionally_stable(self):
+        # 权重 0 的条目不参与文件签名，且有效签名中权重≈0 分支不含 trigger
+        #（trigger 只在 weight≠0 时输出，0 权重改 trigger 不影响结果 → 键不变是正确行为）
+        a = self._changed(stack_json=json.dumps([{"name": "nope.safetensors", "weight": 0.0}]))
+        b = self._changed(stack_json=json.dumps([{"name": "nope.safetensors", "weight": 0.0, "trigger": "t"}]))
+        self.assertEqual(a, b)
+        # 非零权重改 trigger 必须换键
+        c = self._changed(stack_json=json.dumps([{"name": "nope.safetensors", "weight": 0.5}]))
+        d = self._changed(stack_json=json.dumps([{"name": "nope.safetensors", "weight": 0.5, "trigger": "t"}]))
+        self.assertNotEqual(c, d)
+
+
+class StackGroupsAndFilesTests(unittest.TestCase):
+    def test_invalid_download_is_rejected_before_loading_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "bad.safetensors")
+            with open(path, "wb") as stream:
+                stream.write(b"<!DOCTYPE html><html>login required</html>")
+            fp = types.SimpleNamespace(get_full_path=lambda *args: path)
+            with patch.object(lora, "_folder_paths", return_value=fp), patch.object(lora.AllBuyLoRAStack, "_load_base_model") as base:
+                with self.assertRaisesRegex(ValueError, "LoRA 文件无效"):
+                    lora.AllBuyLoRAStack().run("UNET", "None", "base", "None", "None", json.dumps([{"name": "bad.safetensors", "weight": 1}]))
+                base.assert_not_called()
+
+    def test_group_off_keeps_row_switch_and_excludes_trigger_and_signature(self):
+        entries = lora._validated_entries(json.dumps([{"name": "a", "weight": 1, "enabled": True, "group": "风格", "group_off": True, "trigger": "style"}]))
+        self.assertTrue(entries[0]["enabled"])
+        self.assertTrue(entries[0]["group_off"])
+        self.assertEqual(lora._trigger_words(entries), "")
+        self.assertEqual(lora._effective_entry_signature(entries), [{"enabled": False}])
+        self.assertEqual(lora._lora_files_signature(entries), [])
+
+    def test_moved_files_resolve_but_ambiguous_files_do_not(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "a.safetensors")
+            with open(path, "wb") as stream:
+                stream.write(b"data")
+            available = ["new/a.safetensors"]
+            fp = types.SimpleNamespace(get_filename_list=lambda key: available, get_full_path=lambda key, name: path if name in available else None)
+            with patch.object(lora, "_folder_paths", return_value=fp):
+                self.assertEqual(lora._resolve_lora("old/a.safetensors"), path)
+                available.append("second/a.safetensors")
+                with self.assertRaisesRegex(FileNotFoundError, "不唯一"):
+                    lora._resolve_lora("old/a.safetensors")
+
+    def test_missing_is_checked_before_base_loading_and_skip_omits_triggers(self):
+        entries = json.dumps([{"name": "missing", "weight": 1, "trigger": "must not appear"}])
+        fp = types.SimpleNamespace(get_filename_list=lambda key: [], get_full_path=lambda *args: None)
+        with patch.object(lora, "_folder_paths", return_value=fp), \
+                patch.object(lora.AllBuyLoRAStack, "_load_base_model", return_value=("MODEL", "CLIP", "VAE")) as base, \
+                patch.object(lora.AllBuyLoRAStack, "_apply_loras", side_effect=lambda model, entries, **kwargs: model):
+            with self.assertRaises(FileNotFoundError):
+                lora.AllBuyLoRAStack().run("UNET", "None", "base", "None", "None", entries)
+            base.assert_not_called()
+            with self.assertWarns(RuntimeWarning):
+                result = lora.AllBuyLoRAStack().run("UNET", "None", "base", "None", "None", entries, on_missing="skip")
+            self.assertEqual(result, ("MODEL", "CLIP", "VAE", ""))
+
+
+class AuxiliaryLoaderTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        calls = self.calls
+
+        class ClipLoader:
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"clip_name": (["encoder.safetensors"],), "type": (["stable_diffusion", "minimax"],)}}
+
+            def load_clip(self, name, clip_type):
+                calls.append(("clip", name, clip_type))
+                return ("CUSTOM_CLIP",)
+
+        class VaeLoader:
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"vae_name": (["vae.safetensors", "pixel_space"],)}}
+
+            def load_vae(self, name):
+                calls.append(("vae", name))
+                return ("CUSTOM_VAE",)
+
+        self.loaders = {"CLIPLoader": ClipLoader, "VAELoader": VaeLoader}
+        self.core = patch.object(lora, "_comfy_nodes", return_value=types.SimpleNamespace(NODE_CLASS_MAPPINGS=self.loaders))
+        self.core.start()
+        self.addCleanup(self.core.stop)
+
+    def run_stack(self, **kwargs):
+        with patch.object(lora.AllBuyLoRAStack, "_load_base_model", return_value=("MODEL", "BASE_CLIP", "BASE_VAE")), \
+                patch.object(lora.AllBuyLoRAStack, "_apply_loras", side_effect=lambda model, entries: model):
+            return lora.AllBuyLoRAStack().run("Checkpoint", "base", "None", "None", "None", "[]", **kwargs)
+
+    def test_old_workflows_keep_checkpoint_outputs(self):
+        self.assertEqual(self.run_stack(), ("MODEL", "BASE_CLIP", "BASE_VAE", ""))
+        self.assertEqual(self.run_stack(clip_name="None", vae_name="None"), ("MODEL", "BASE_CLIP", "BASE_VAE", ""))
+        self.assertEqual(self.calls, [])
+
+    def test_selected_loaders_supply_outputs_and_forward_type(self):
+        self.assertEqual(self.run_stack(clip_name="encoder.safetensors", clip_type="minimax", vae_name="pixel_space"),
+                         ("MODEL", "CUSTOM_CLIP", "CUSTOM_VAE", ""))
+        self.assertEqual(self.calls, [("clip", "encoder.safetensors", "minimax"), ("vae", "pixel_space")])
+
+    def test_one_override_preserves_the_other_output(self):
+        self.assertEqual(self.run_stack(vae_name="vae.safetensors"), ("MODEL", "BASE_CLIP", "CUSTOM_VAE", ""))
+
+    def test_unet_can_return_independent_clip_and_vae(self):
+        with patch.object(lora.AllBuyLoRAStack, "_load_base_model", return_value=("MODEL", None, None)), \
+                patch.object(lora.AllBuyLoRAStack, "_apply_loras", side_effect=lambda model, entries: model):
+            result = lora.AllBuyLoRAStack().run("UNET", "None", "unet", "None", "None", "[]",
+                                              clip_name="encoder.safetensors", vae_name="vae.safetensors")
+        self.assertEqual(result, ("MODEL", "CUSTOM_CLIP", "CUSTOM_VAE", ""))
+
+    def test_no_base_can_load_auxiliaries_without_resolving_or_applying_loras(self):
+        entries = json.dumps([{"name": "missing.safetensors", "weight": 1, "trigger": "style"}])
+        with patch.object(lora, "_resolve_lora") as resolve, patch.object(lora.AllBuyLoRAStack, "_apply_loras") as apply:
+            result = lora.AllBuyLoRAStack().run("None", "old-ckpt", "old-unet", "old-gguf", "None", entries,
+                                               clip_name="encoder.safetensors", vae_name="vae.safetensors")
+            self.assertEqual(result, (None, "CUSTOM_CLIP", "CUSTOM_VAE", "style"))
+            resolve.assert_not_called()
+            apply.assert_not_called()
+
+    def test_schema_uses_native_choices_and_appends_widgets(self):
+        folder = types.SimpleNamespace(get_filename_list=lambda key: [])
+        with patch.object(lora, "_folder_paths", return_value=folder):
+            schema = lora.AllBuyLoRAStack.INPUT_TYPES()
+        optional = schema["optional"]
+        self.assertEqual(list(optional)[-4:], ["clip_name", "clip_type", "vae_name", "on_missing"])
+        self.assertEqual(optional["clip_name"][0], ["None", "encoder.safetensors"])
+        self.assertEqual(optional["clip_type"][0], ["stable_diffusion", "minimax"])
+        self.assertIn("pixel_space", optional["vae_name"][0])
+
+    def test_selection_and_type_invalidate_execution_cache(self):
+        base = dict(模型类型="UNET", ckpt_name="None", unet_name="model", gguf_name="None", lora_picker="None", stack_json="[]")
+        initial = lora.AllBuyLoRAStack.IS_CHANGED(**base)
+        for selection in ({"clip_name": "encoder.safetensors"}, {"clip_type": "minimax"}, {"vae_name": "pixel_space"}):
+            self.assertNotEqual(initial, lora.AllBuyLoRAStack.IS_CHANGED(**base, **selection))
+
+
+class LoadBaseModelTests(unittest.TestCase):
+    def test_gguf_loader_missing_raises(self):
+        # 查找走 nodes.NODE_CLASS_MAPPINGS 字典：模拟"宿主在、GGUF 插件未装"= 注册表无该键
+        class FakeNodes:
+            NODE_CLASS_MAPPINGS = {}
+
+        orig = lora._comfy_nodes
+        lora._comfy_nodes = lambda: FakeNodes()
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                lora.AllBuyLoRAStack._load_base_model(
+                    "GGUF", "None", "None", "m.gguf",
+                    gguf_dequant_dtype="default", gguf_patch_dtype="default", gguf_patch_on_device=False)
+            self.assertIn("ComfyUI-GGUF", str(ctx.exception))
+        finally:
+            lora._comfy_nodes = orig
+
+    def test_gguf_loader_found_via_mappings(self):
+        # 插件以字典键注册（ComfyUI-GGUF 同款）时应被找到，且实参与 load_unet 签名匹配
+        calls = {}
+
+        class FakeLoader:
+            def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
+                calls.update(unet_name=unet_name, dequant_dtype=dequant_dtype,
+                             patch_dtype=patch_dtype, patch_on_device=patch_on_device)
+                return ("MODEL",)
+
+        class FakeNodes:
+            NODE_CLASS_MAPPINGS = {"UnetLoaderGGUF": FakeLoader}
+
+        orig = lora._comfy_nodes
+        lora._comfy_nodes = lambda: FakeNodes()
+        try:
+            model, clip, vae = lora.AllBuyLoRAStack._load_base_model(
+                "GGUF", "None", "None", "m.gguf",
+                gguf_dequant_dtype="float16", gguf_patch_dtype="default", gguf_patch_on_device=True)
+            self.assertEqual(model, "MODEL")
+            self.assertIsNone(clip)
+            self.assertIsNone(vae)
+            self.assertEqual(calls, {"unet_name": "m.gguf", "dequant_dtype": "float16",
+                                     "patch_dtype": "default", "patch_on_device": True})
+        finally:
+            lora._comfy_nodes = orig
+
+    def test_none_selection_skips_loading_without_importing_comfy(self):
+        for t, args in [
+            ("Checkpoint", ("None", "None", "None")),
+            ("UNET", ("None", "None", "None")),
+            ("GGUF", ("None", "None", "None")),
+            ("None", ("stale-ckpt", "stale-unet", "stale-gguf")),
+        ]:
+            with self.subTest(type=t), patch.object(lora, "_comfy_nodes") as loaders:
+                self.assertEqual(lora.AllBuyLoRAStack._load_base_model(t, *args), (None, None, None))
+                loaders.assert_not_called()
+
+    def test_schema_allows_none_for_each_base_type_and_keeps_existing_defaults(self):
+        folder = types.SimpleNamespace(get_filename_list=lambda key: ["demo.safetensors"])
+        with patch.object(lora, "_folder_paths", return_value=folder), patch.object(lora, "_gguf_list", return_value=["demo.gguf"]):
+            required = lora.AllBuyLoRAStack.INPUT_TYPES()["required"]
+        self.assertIn("None", required["模型类型"][0])
+        for key in ("ckpt_name", "unet_name", "gguf_name"):
+            self.assertIn("None", required[key][0])
+            self.assertNotEqual(required[key][1]["default"], "None")
+
+
+if __name__ == "__main__":
+    unittest.main()
